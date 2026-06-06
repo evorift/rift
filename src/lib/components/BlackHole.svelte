@@ -165,7 +165,7 @@
       float depth = CAMD - Pc.z;                         // kameraya uzaklık (büyük = uzak)
       float sr = length(2.0 * Pc.xy / depth);            // apparent ekran yarıçapı (gölge kenarı ~0.29)
       float behind = smoothstep(0.05, -0.05, Pc.z);      // Pc.z<0 -> kara deliğin ARKA tarafı
-      float inSil  = smoothstep(0.40, 0.26, sr);         // siluet (gölge+halka+iç) içinde
+      float inSil  = smoothstep(0.80, 0.52, sr);         // siluet ~2x genişletildi
       float occ = behind * inSil;
       float grow = sin(life * 3.14159265);               // küçükten büyüyüp -> küçülerek yok
       gl_PointSize = (0.4 + 3.6 * grow) * 1.7;
