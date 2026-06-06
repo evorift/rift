@@ -40,12 +40,12 @@
     status === "on" ? "Korumalı" : status === "connecting" ? "Bağlanıyor…" : "Kapalı"
   );
   const heroTitle = $derived(
-    status === "on" ? "Özgürsün." : status === "connecting" ? "Bağlanıyor…" : "Korumayı başlat"
+    status === "on" ? "Rift açık · Gizlisin" : status === "connecting" ? "Rift açılıyor…" : "Rift kapalı"
   );
   const heroSub = $derived(
     status === "on"
-      ? "Gizlisin ve engeller aşıldı — yalnızca seçili siteler etkileniyor, gerisi normal."
-      : "Tek tıkla engelleri aş. VPN yok, hız düşmez."
+      ? "Engeller aşıldı, izin gizlendi — yalnızca seçili siteler etkileniyor, gerisi normal."
+      : "Korumasızsın. Rift'i aç: tek tıkla engelleri aş. VPN yok, hız düşmez."
   );
 
   const sections: Record<string, string> = {
