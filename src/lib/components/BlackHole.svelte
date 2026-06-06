@@ -160,11 +160,13 @@
       float ang = h2 * 6.2831853 + uTime * spd;
       vec3 P = vec3(cos(ang) * r, 0.0, sin(ang) * r);
       gl_Position = project(P);
-      // kara deliğin ARKASINA geçince gizle (dünya-uzayı impact parametresi)
-      vec3 ax = rotY(uYaw) * rotX(uPitch) * vec3(0.0, 0.0, 1.0);  // kamera ekseni (origin->kamera)
-      float tproj = dot(P, ax);                                    // >0 ön, <0 arka
-      float perp  = length(P - tproj * ax);                        // eksene dik mesafe
-      float occ = smoothstep(0.5, -0.5, tproj) * smoothstep(3.1, 2.4, perp); // arka + gölge içinde -> gizle
+      // kara deliğin ARKASINA geçince gizle (perspektif-doğru apparent yarıçap)
+      vec3 Pc = rotX(-uPitch) * rotY(-uYaw) * P;        // kamera çerçevesi (kamera +z'de, origin'e bakar)
+      float depth = CAMD - Pc.z;                         // kameraya uzaklık (büyük = uzak)
+      float sr = length(2.0 * Pc.xy / depth);            // apparent ekran yarıçapı (gölge kenarı ~0.29)
+      float behind = smoothstep(0.05, -0.05, Pc.z);      // Pc.z<0 -> kara deliğin ARKA tarafı
+      float inSil  = smoothstep(0.40, 0.26, sr);         // siluet (gölge+halka+iç) içinde
+      float occ = behind * inSil;
       float grow = sin(life * 3.14159265);               // küçükten büyüyüp -> küçülerek yok
       gl_PointSize = (0.4 + 3.6 * grow) * 1.7;
       vA = grow * smoothstep(0.0, 0.2, uActive) * (1.0 - occ);
