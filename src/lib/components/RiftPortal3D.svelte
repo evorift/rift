@@ -1,226 +1,131 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import * as THREE from "three";
-  import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-  import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
-  import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
-  import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 
   let { status = "off", onToggle }: { status?: "off" | "connecting" | "on"; onToggle?: () => void } = $props();
 
   let host: HTMLDivElement;
   let raf = 0;
-  let phase: "closed" | "burst" | "suck" | "open" = "closed";
-  let riftTarget = 0, riftScale = 0.0001;
-  let timers: number[] = [];
-  const clearTimers = () => { timers.forEach(clearTimeout); timers = []; };
-
-  const COUNT = 1500;
-  let pos: Float32Array, vel: Float32Array, dead: Uint8Array;
-  let pGeo: THREE.BufferGeometry, points: THREE.Points;
-  let riftGroup: THREE.Group, riftMat: THREE.ShaderMaterial;
-  let composer: EffectComposer, controls: OrbitControls, camera: THREE.PerspectiveCamera, renderer: THREE.WebGLRenderer;
+  let renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.OrthographicCamera, mat: THREE.ShaderMaterial;
   const clock = new THREE.Clock();
+  let uStateTarget = 0;
+  let mouseX = 0, mouseY = 0;
+
+  const VERT = `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.0,1.0); }`;
 
   const FRAG = `
-    uniform float uTime; varying vec2 vUv;
-    float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453123); }
-    float noise(vec2 p){ vec2 i=floor(p),f=fract(p); float a=hash(i),b=hash(i+vec2(1.,0.)),c=hash(i+vec2(0.,1.)),d=hash(i+vec2(1.,1.)); vec2 u=f*f*(3.-2.*f); return mix(mix(a,b,u.x),mix(c,d,u.x),u.y); }
-    void main(){
-      vec2 uv=vUv; float x=uv.x-0.5, y=uv.y-0.5;
-      float taper=smoothstep(0.5,0.08,abs(y));
-      float width=0.035+0.10*pow(1.0-taper,1.5);
-      float wob=(noise(vec2(uv.y*8.0,uTime*1.5))-0.5)*0.06*taper;
-      float horiz=abs(x-wob);
-      float core=smoothstep(width,0.0,horiz)*taper;
-      float halo=smoothstep(0.33,0.0,horiz)*taper;
-      float flick=0.75+0.25*noise(vec2(uv.y*30.0,uTime*10.0));
-      vec3 cyan=vec3(0.0,0.95,1.0), mag=vec3(1.0,0.15,0.95);
-      vec3 col=mix(cyan,mag, clamp(smoothstep(-0.5,0.5,y)+0.15*sin(uTime*1.5+uv.y*10.0),0.0,1.0));
-      vec3 outc=col*(core*2.4*flick + halo*0.5);
-      gl_FragColor=vec4(outc, max(core, halo*0.5));
-    }`;
-  const VERT = `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`;
+    precision highp float;
+    uniform float uTime, uState, uAspect; uniform vec2 uMouse; varying vec2 vUv;
 
-  function spriteTex() {
-    const c = document.createElement("canvas"); c.width = c.height = 64;
-    const g = c.getContext("2d")!;
-    const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-    grd.addColorStop(0, "rgba(255,255,255,1)"); grd.addColorStop(0.4, "rgba(255,255,255,0.55)"); grd.addColorStop(1, "rgba(255,255,255,0)");
-    g.fillStyle = grd; g.fillRect(0, 0, 64, 64);
-    return new THREE.CanvasTexture(c);
-  }
+    float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+    float noise(vec2 p){ vec2 i=floor(p),f=fract(p); f=f*f*(3.0-2.0*f);
+      return mix(mix(hash(i),hash(i+vec2(1,0)),f.x), mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x), f.y); }
+    float fbm(vec2 p){ float a=0.5,s=0.0; for(int i=0;i<5;i++){ s+=a*noise(p); p=p*2.02+1.7; a*=0.5; } return s; }
 
-  function spawn() {
-    for (let i = 0; i < COUNT; i++) {
-      dead[i] = 0;
-      pos[i * 3] = (Math.random() - 0.5) * 0.2;
-      pos[i * 3 + 1] = (Math.random() - 0.5) * 0.2;
-      pos[i * 3 + 2] = (Math.random() - 0.5) * 0.2;
-      const a = Math.random() * Math.PI * 2, el = (Math.random() - 0.5) * 0.6;
-      const s = 2.5 + Math.random() * 4.5;
-      vel[i * 3] = Math.cos(a) * s;
-      vel[i * 3 + 1] = Math.sin(a) * s;
-      vel[i * 3 + 2] = el * s * 0.4;
+    float energyAt(vec2 uv){
+      float ang=atan(uv.y,uv.x); float r=length(uv);
+      vec2 warp=vec2(fbm(uv*3.0+uTime*0.15), fbm(uv*3.0-uTime*0.12+7.0));
+      vec2 p=vec2(ang*1.6+uTime*0.25, r*5.0-uTime*0.75)+warp*0.9;
+      return fbm(p);
     }
-    pGeo.attributes.position.needsUpdate = true;
-  }
-  function hideParticles() {
-    for (let i = 0; i < COUNT; i++) { dead[i] = 1; pos[i * 3 + 2] = -1000; }
-    pGeo.attributes.position.needsUpdate = true;
-  }
+
+    void main(){
+      vec2 uv=(vUv-0.5); uv.x*=uAspect;
+      uv += uMouse*0.04*uState;                 // hafif parallaks
+
+      float openW=mix(0.16,0.40,uState);
+      float squashX=mix(6.0,1.8,uState);        // dormant: ince dikey yarık
+      float d=length(vec2(uv.x*squashX, uv.y/1.18));
+      float mask=1.0-smoothstep(openW*0.78, openW, d);
+
+      float e=energyAt(uv); e=pow(e, mix(3.0,1.25,uState));
+      float edge=smoothstep(openW*0.5, openW, d);
+      float off=edge*0.045;
+      float eR=energyAt(uv+vec2(off,0.0)); float eB=energyAt(uv-vec2(off,0.0));
+
+      vec3 cyan=vec3(0.1,0.95,1.3), mag=vec3(1.3,0.2,1.05);
+      vec3 col=mix(cyan,mag, clamp(0.5+uv.y*0.85+0.2*sin(uTime+uv.y*8.0),0.0,1.0));
+      col.r*=(0.55+0.85*eR); col.g*=(0.55+0.85*e); col.b*=(0.55+0.85*eB);
+
+      float core=e*mask;
+      float seam=(1.0-smoothstep(0.0,openW*0.55,d))*mix(0.45,1.0,uState);
+      vec3 outc=col*(core*1.9 + seam*1.25);
+
+      float glow=exp(-d*mix(11.0,5.5,uState))*mix(0.12,0.5,uState);
+      outc += vec3(0.25,0.75,1.0)*glow;
+
+      float a=clamp(core + seam*0.85 + glow, 0.0, 1.0) * mix(0.55,1.0,uState);
+      gl_FragColor=vec4(outc*a, a);             // premultiplied
+    }`;
 
   let prev = status;
   $effect(() => {
     if (status === prev) return;
-    if ((status === "connecting" || status === "on") && prev === "off") { phase = "burst"; spawn(); }
-    if (status === "on") {
-      clearTimers();
-      phase = "suck"; riftTarget = 1;
-      timers.push(setTimeout(() => { phase = "open"; }, 1300) as unknown as number);
-    }
-    if (status === "off") { clearTimers(); phase = "closed"; riftTarget = 0; hideParticles(); }
+    uStateTarget = (status === "on" || status === "connecting") ? 1 : 0;
     prev = status;
   });
 
-  function updateParticles(dt: number) {
-    if (phase !== "burst" && phase !== "suck") return;
-    for (let i = 0; i < COUNT; i++) {
-      if (dead[i]) continue;
-      const ix = i * 3, iy = ix + 1, iz = ix + 2;
-      if (phase === "burst") {
-        const damp = Math.max(0, 1 - 1.4 * dt);
-        vel[ix] *= damp; vel[iy] *= damp; vel[iz] *= damp;
-      } else {
-        const dx = -pos[ix], dy = -pos[iy], dz = -pos[iz];
-        const d = Math.hypot(dx, dy, dz) || 1;
-        const acc = 14 + (4 - Math.min(4, d)) * 8;
-        vel[ix] += (dx / d) * acc * dt;
-        vel[iy] += (dy / d) * acc * dt;
-        vel[iz] += (dz / d) * acc * dt;
-        // spiral
-        vel[ix] += (-dy / d) * 6 * dt;
-        vel[iy] += (dx / d) * 6 * dt;
-        const damp = Math.max(0, 1 - 2.0 * dt);
-        vel[ix] *= damp; vel[iy] *= damp; vel[iz] *= damp;
-        if (d < 0.3) { dead[i] = 1; pos[iz] = -1000; continue; }
-      }
-      pos[ix] += vel[ix] * dt; pos[iy] += vel[iy] * dt; pos[iz] += vel[iz] * dt;
-    }
-    pGeo.attributes.position.needsUpdate = true;
+  function size() {
+    const w = host.clientWidth || 1, h = host.clientHeight || 1;
+    renderer.setSize(w, h);
+    mat.uniforms.uAspect.value = w / h;
   }
 
   function animate() {
     raf = requestAnimationFrame(animate);
-    const dt = Math.min(0.05, clock.getDelta());
-    const t = clock.elapsedTime;
-    riftMat.uniforms.uTime.value = t;
-    riftScale += (riftTarget - riftScale) * Math.min(1, dt * 5);
-    riftGroup.scale.setScalar(Math.max(0.0001, riftScale));
-    riftGroup.visible = riftScale > 0.02;
-    riftGroup.rotation.y += dt * 0.25;
-    updateParticles(dt);
-    points.visible = phase === "burst" || phase === "suck";
-    controls.update();
-    composer.render();
-  }
-
-  function resize() {
-    const w = host.clientWidth, h = host.clientHeight;
-    if (!w || !h) return;
-    renderer.setSize(w, h); composer.setSize(w, h);
-    camera.aspect = w / h; camera.updateProjectionMatrix();
+    mat.uniforms.uTime.value = clock.getElapsedTime();
+    const cur = mat.uniforms.uState.value;
+    mat.uniforms.uState.value += (uStateTarget - cur) * 0.05;
+    mat.uniforms.uMouse.value.set(mouseX, mouseY);
+    renderer.render(scene, camera);
   }
 
   onMount(() => {
-    const w = host.clientWidth || 600, h = host.clientHeight || 360;
-    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, premultipliedAlpha: true });
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
-    renderer.setSize(w, h);
-    renderer.setClearColor(0x04060a, 1);
+    renderer.setClearAlpha(0); // ŞEFFAF — kutu yok
     host.appendChild(renderer.domElement);
 
-    const scene = new THREE.Scene();
-    camera = new THREE.PerspectiveCamera(50, w / h, 0.1, 100);
-    camera.position.set(0, 0, 6);
-
-    // rift: çapraz düzlemler (3D hacim hissi)
-    riftMat = new THREE.ShaderMaterial({
-      uniforms: { uTime: { value: 0 } }, vertexShader: VERT, fragmentShader: FRAG,
-      transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    scene = new THREE.Scene();
+    camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 }, uState: { value: status === "on" ? 1 : 0 },
+        uAspect: { value: 1 }, uMouse: { value: new THREE.Vector2() },
+      },
+      vertexShader: VERT, fragmentShader: FRAG,
+      transparent: true, depthWrite: false, depthTest: false,
     });
-    riftGroup = new THREE.Group();
-    for (let i = 0; i < 3; i++) {
-      const m = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 4.6), riftMat);
-      m.rotation.y = (i * Math.PI) / 3;
-      riftGroup.add(m);
-    }
-    riftGroup.scale.setScalar(0.0001);
-    scene.add(riftGroup);
+    uStateTarget = status === "on" ? 1 : 0;
+    scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat));
 
-    // parçacıklar
-    pos = new Float32Array(COUNT * 3); vel = new Float32Array(COUNT * 3); dead = new Uint8Array(COUNT);
-    const col = new Float32Array(COUNT * 3);
-    for (let i = 0; i < COUNT; i++) {
-      dead[i] = 1; pos[i * 3 + 2] = -1000;
-      const mag = Math.random() > 0.5;
-      col[i * 3] = mag ? 1.0 : 0.0; col[i * 3 + 1] = mag ? 0.15 : 0.95; col[i * 3 + 2] = mag ? 0.95 : 1.0;
-    }
-    pGeo = new THREE.BufferGeometry();
-    pGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    pGeo.setAttribute("color", new THREE.BufferAttribute(col, 3));
-    const pMat = new THREE.PointsMaterial({ size: 0.08, map: spriteTex(), vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true });
-    points = new THREE.Points(pGeo, pMat); points.visible = false; scene.add(points);
-
-    controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true; controls.dampingFactor = 0.08;
-    controls.enablePan = false; controls.enableZoom = true;
-    controls.minDistance = 3.5; controls.maxDistance = 9; controls.rotateSpeed = 0.6;
-
-    composer = new EffectComposer(renderer);
-    composer.addPass(new RenderPass(scene, camera));
-    const bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 1.25, 0.6, 0.0);
-    composer.addPass(bloom);
-
-    if (status === "on") { phase = "open"; riftTarget = 1; riftScale = 1; }
-
-    const ro = new ResizeObserver(resize); ro.observe(host);
+    size();
+    const ro = new ResizeObserver(size); ro.observe(host);
+    const onMove = (e: PointerEvent) => {
+      const r = host.getBoundingClientRect();
+      mouseX = ((e.clientX - r.left) / r.width - 0.5) * 2;
+      mouseY = -((e.clientY - r.top) / r.height - 0.5) * 2;
+    };
+    host.addEventListener("pointermove", onMove);
     const onVis = () => { if (document.hidden) { cancelAnimationFrame(raf); raf = 0; } else if (!raf) animate(); };
     document.addEventListener("visibilitychange", onVis);
     animate();
 
     return () => {
-      cancelAnimationFrame(raf); clearTimers(); ro.disconnect();
+      cancelAnimationFrame(raf); ro.disconnect();
+      host.removeEventListener("pointermove", onMove);
       document.removeEventListener("visibilitychange", onVis);
       renderer.dispose();
     };
   });
 </script>
 
-<div class="rift-host" bind:this={host}>
-  {#if status === "off"}
-    <button class="closed-btn" onclick={onToggle} aria-label="Rift'i aç">
-      <span class="slit"></span>
-      <span class="lbl">RİFT KAPALI · AÇMAK İÇİN TIKLA</span>
-    </button>
-  {/if}
-</div>
+<button class="rift-host" bind:this={host} onclick={onToggle} aria-label="Rift'i aç/kapat"></button>
 
 <style>
-  .rift-host { position: relative; width: 100%; height: 100%; min-height: 320px; }
-  :global(.rift-host canvas) { display: block; border-radius: 14px; }
-
-  .closed-btn {
-    position: absolute; inset: 0; margin: auto;
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
-    background: transparent; border: none; cursor: pointer; color: var(--text-dim);
+  .rift-host {
+    position: relative; width: 100%; height: 100%; min-height: 320px;
+    border: none; background: transparent; cursor: pointer; padding: 0; display: block;
   }
-  .slit {
-    width: 4px; height: 120px; border-radius: 4px;
-    background: linear-gradient(180deg, transparent, #6b6fae 20%, #8a6fd6 50%, #6b6fae 80%, transparent);
-    box-shadow: 0 0 18px 2px rgba(140,110,230,.5);
-    transition: transform .2s;
-  }
-  .closed-btn:hover .slit { transform: scaleY(1.08); box-shadow: 0 0 26px 3px rgba(150,120,255,.7); }
-  .lbl { font-size: 11px; font-weight: 700; letter-spacing: 2px; }
+  :global(.rift-host canvas) { display: block; width: 100% !important; height: 100% !important; }
 </style>
