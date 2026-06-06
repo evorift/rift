@@ -16,8 +16,13 @@
 
   // CANLI AYAR sliderları (değeri okuyup bana söyle)
   let rollDeg = $state(-15);  // ekran-dik eksen eğimi (derece)
-  let ringR = $state(6.9);    // beyaz parçacık ring yarıçapı
-  let blackR = $state(4.6);   // siyah parçacık yarıçapı (beyaz diskin üstünde)
+  let ringR = $state(8.3);    // beyaz parçacık ring yarıçapı
+  let blackR = $state(5.0);   // siyah parçacık yarıçapı (beyaz diskin üstünde)
+  // dönme limitleri (derece) — sen maks açıları göster
+  let yawDeg = $state(55);        // sağ/sol maks (±)
+  let pitchBaseDeg = $state(12);  // dinlenme eğimi
+  let pitchUpDeg = $state(34);    // yukarı maks (ek)
+  let pitchDnDeg = $state(10);    // aşağı maks (ek)
 
   const SCALE = 0.9;
 
@@ -183,12 +188,14 @@
   function animate() {
     raf = requestAnimationFrame(animate);
     const t = clock.getElapsedTime();
-    const drift = Math.sin(t * 0.12) * 0.3;
-
-    // sağ-sol normal (yaw), yukarı-aşağı dikey döndürme (pitch, geniş aralık)
-    yaw   += ((mx * 0.9 + drift) - yaw) * 0.05;
-    pitch += ((0.20 + my * 0.41) - pitch) * 0.05;   // dikey hareket ~5° azaltıldı, hafif yan
-    pitch = Math.max(0.0, Math.min(0.88, pitch));
+    const drift = Math.sin(t * 0.12) * 0.06;        // hafif "canlı" dinlenme salınımı
+    const D2R = Math.PI / 180;
+    const yawT   = mx * (yawDeg * D2R) + drift;                          // sağ/sol limit
+    const pitchT = (pitchBaseDeg * D2R) + (my >= 0 ? my * pitchUpDeg : my * pitchDnDeg) * D2R; // yukarı/aşağı limit
+    // fare ayrılınca (mx=my=0) dinlenme pozisyonuna yumuşakça döner
+    yaw   += (yawT - yaw) * 0.06;
+    pitch += (pitchT - pitch) * 0.06;
+    pitch = Math.max(0.0, Math.min(1.35, pitch));
 
     active += (activeTarget - active) * 0.05;
     const reveal = Math.max(0, Math.min(1, (active - 0.3) / 0.7)); // disk/ring biraz sonra
@@ -253,7 +260,7 @@
       uniforms: {
         uTime: { value: 0 }, uActive: { value: 0 }, uAspect: { value: 1 }, uLife: { value: 3.5 },
         uYaw: { value: 0 }, uPitch: { value: 0.25 }, uRoll: { value: 0 },
-        uRing: { value: 6.9 }, uBlackR: { value: 4.6 },
+        uRing: { value: 8.3 }, uBlackR: { value: 5.0 },
       },
       vertexShader: PART_VERT, fragmentShader: PART_FRAG,
       transparent: true, depthTest: false, depthWrite: false, blending: THREE.NormalBlending,
@@ -268,6 +275,8 @@
       my = -((e.clientY - r.top) / r.height - 0.5) * 2;
     };
     host.addEventListener("pointermove", onMove);
+    const onLeave = () => { mx = 0; my = 0; };   // ayrılınca dinlenme pozisyonuna dön
+    host.addEventListener("pointerleave", onLeave);
     const onVis = () => { if (document.hidden) { cancelAnimationFrame(raf); raf = 0; } else if (!raf) animate(); };
     document.addEventListener("visibilitychange", onVis);
     animate();
@@ -275,6 +284,7 @@
     return () => {
       cancelAnimationFrame(raf); obs.disconnect();
       host.removeEventListener("pointermove", onMove);
+      host.removeEventListener("pointerleave", onLeave);
       document.removeEventListener("visibilitychange", onVis);
       geo.dispose(); mat.dispose(); pg.dispose(); pMat.dispose();
       renderer.dispose(); renderer.forceContextLoss(); renderer.domElement.remove();
@@ -292,8 +302,12 @@
   </button>
   <div class="dbg">
     <label>Roll <b>{rollDeg}°</b><input type="range" min="-45" max="45" step="1" bind:value={rollDeg} /></label>
-    <label>Ring <b>{ringR.toFixed(1)}</b><input type="range" min="1" max="14" step="0.1" bind:value={ringR} /></label>
-    <label>Black <b>{blackR.toFixed(1)}</b><input type="range" min="1" max="10" step="0.1" bind:value={blackR} /></label>
+    <label>Ring <b>{ringR.toFixed(1)}</b><input type="range" min="1" max="16" step="0.1" bind:value={ringR} /></label>
+    <label>Black <b>{blackR.toFixed(1)}</b><input type="range" min="1" max="12" step="0.1" bind:value={blackR} /></label>
+    <label>Yaw± <b>{yawDeg}°</b><input type="range" min="0" max="120" step="1" bind:value={yawDeg} /></label>
+    <label>P.base <b>{pitchBaseDeg}°</b><input type="range" min="0" max="60" step="1" bind:value={pitchBaseDeg} /></label>
+    <label>P.up <b>{pitchUpDeg}°</b><input type="range" min="0" max="80" step="1" bind:value={pitchUpDeg} /></label>
+    <label>P.dn <b>{pitchDnDeg}°</b><input type="range" min="0" max="60" step="1" bind:value={pitchDnDeg} /></label>
   </div>
 </div>
 
