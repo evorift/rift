@@ -11,7 +11,7 @@
 
   // mouse-driven orbit targets + lerped state
   let mx = 0, my = 0;
-  let yaw = 0, pitch = 0.42;
+  let yaw = 0, pitch = 0.12;
   let active = 0, activeTarget = 0;
 
   // render the heavy raymarch at reduced internal resolution, CSS upscales.
@@ -57,7 +57,7 @@
       // orbit camera: rotate a fixed basis by yaw/pitch
       mat3 R = rotY(uYaw) * rotX(uPitch);
       vec3 ro = R * vec3(0.0, 0.0, 9.0);            // camera position (distance ~9)
-      vec3 rd = R * normalize(vec3(uv, -3.5));      // ray dir (zoomed in -> bigger, clearer hole)
+      vec3 rd = R * normalize(vec3(uv, -2.9));      // ray dir (focal length)
 
       // geodesic integration variables
       vec3  pos = ro;
@@ -67,7 +67,7 @@
       float h2 = dot(cprod, cprod);
 
       vec3  col   = vec3(0.0);   // composited disk radiance (front-to-back)
-      float emis  = 0.0;         // separate emissive accumulator (photon ring) over empty space
+      float minR  = 100.0;       // closest approach to photon sphere -> crisp ring (no haze)
       float transmit = 1.0;      // remaining transparency (1 = clear, 0 = fully covered)
       float hitHorizon = 0.0;
       vec3  oldpos = pos;
@@ -109,13 +109,8 @@
           break;
         }
 
-        // bright thin photon ring near the photon sphere (r ~ 1.5).
-        // EMISSIVE over empty space: accumulate into its own channel so it is NOT
-        // erased where the ray ultimately escapes (transmit ~ 1). Always on (pure
-        // lensing, independent of uActive). Signed-base squaring (d*d) is NaN-safe.
-        float d    = (r - 1.5) * 9.0;
-        float ring = exp(-d * d);
-        emis += ring * 0.10 * transmit;
+        // track closest approach to the photon sphere (~1.5) -> single crisp ring later
+        minR = min(minR, r);
 
         // accretion disk lives in the y = 0 equatorial plane.
         // detect plane crossing by sign change of y between consecutive samples.
@@ -145,12 +140,11 @@
       // pure black & white: crisp clamp (no rolloff -> no grey midtones)
       col = clamp(col, 0.0, 1.0);
 
-      // premultiplied output. The photon ring is emissive (carries its own alpha),
-      // so it is added AFTER premultiply and contributes to alpha via max(a, emis)
-      // -> it survives over the transparent background instead of being erased.
-      emis = clamp(emis, 0.0, 1.0);
-      vec3  outRGB = col * a + vec3(emis);
-      float outA   = clamp(max(a, emis), 0.0, 1.0);
+      // single crisp white photon ring at closest approach to the photon sphere (~1.5),
+      // only for rays that did NOT fall into the hole. No volumetric haze.
+      float ring = smoothstep(0.16, 0.0, abs(minR - 1.5)) * (1.0 - hitHorizon);
+      vec3  outRGB = col * a + vec3(ring);
+      float outA   = clamp(max(a, ring), 0.0, 1.0);
       gl_FragColor = vec4(outRGB, outA);
     }`;
 
@@ -173,9 +167,9 @@
     // lerp orbit toward mouse target, plus a slow auto drift so it's never dead
     const drift = Math.sin(t * 0.12) * 0.35;
     yaw   += ((mx * 0.9 + drift) - yaw) * 0.05;
-    pitch += ((0.42 + my * 0.45) - pitch) * 0.05;
-    // clamp pitch so it never goes fully edge-on (lensing must stay visible)
-    pitch = Math.max(0.18, Math.min(1.15, pitch));
+    pitch += ((0.12 + my * 0.28) - pitch) * 0.05;
+    // near edge-on (Interstellar look); small range so the disk stays a thin lensed band
+    pitch = Math.max(0.02, Math.min(0.5, pitch));
     active += (activeTarget - active) * 0.05;
 
     mat.uniforms.uTime.value = t;
@@ -201,7 +195,7 @@
         uRes:    { value: new THREE.Vector2(1, 1) },
         uTime:   { value: 0 },
         uYaw:    { value: 0 },
-        uPitch:  { value: 0.42 },
+        uPitch:  { value: 0.12 },
         uActive: { value: 0 },
       },
       vertexShader: VERT,
