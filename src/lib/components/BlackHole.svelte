@@ -153,12 +153,16 @@
       float baseR = (aBlack > 0.5) ? uBlackR : uRing;
       // içe doğru yoğunlaşma (merkeze yakın daha fazla) + çok çok az içe sürüklenme
       float r = baseR * mix(0.68, 1.12, h1 * h1) * (1.0 - life * 0.05);
-      float ang = h2 * 6.2831853 + uTime * 7.0 * pow(r, -1.5);    // beyaz+siyah AYNI yön
+      float ang = h2 * 6.2831853 + uTime * 3.5 * pow(r, -1.5);    // dönme hızı yarıya
       vec3 P = vec3(cos(ang) * r, 0.0, sin(ang) * r);
       gl_Position = project(P);
+      // kara deliğin gölgesinin ARKASINA geçince gizle (occlusion)
+      vec3 Pc = rotX(-uPitch) * rotY(-uYaw) * P;
+      float screenR = length(2.0 * Pc.xy / (CAMD - Pc.z));
+      float occ = smoothstep(0.6, 0.0, Pc.z) * smoothstep(0.34, 0.26, screenR);
       float grow = sin(life * 3.14159265);               // küçükten büyüyüp -> küçülerek yok
       gl_PointSize = (0.4 + 3.6 * grow) * 1.7;
-      vA = grow * smoothstep(0.0, 0.2, uActive);
+      vA = grow * smoothstep(0.0, 0.2, uActive) * (1.0 - occ);
       vBlack = aBlack;
     }`;
   const PART_FRAG = `
