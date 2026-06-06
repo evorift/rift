@@ -158,52 +158,52 @@
     }`;
 
   // --- power-button -> particles geçiş katmanı (clip-space, kameradan bağımsız) ---
-  const PVERT = `
-    uniform float uBurst, uAspect;
+  // kara delik shader'ı ile AYNI kamera (D=18, focal=2, 15° roll) -> parçacıklar 3B uzayda hizalı
+  const PROJ = `
+    uniform float uYaw, uPitch, uAspect;
+    const float CAMD = 18.0;
+    const float ROLL2 = 0.2618;
+    mat3 rotX(float a){ float c=cos(a), s=sin(a); return mat3(1.,0.,0., 0.,c,-s, 0.,s,c); }
+    mat3 rotY(float a){ float c=cos(a), s=sin(a); return mat3(c,0.,s, 0.,1.,0., -s,0.,c); }
+    vec4 project(vec3 P){
+      vec3 Pc = rotX(-uPitch) * rotY(-uYaw) * P;      // world -> kamera çerçevesi
+      vec2 uv = 2.0 * Pc.xy / (CAMD - Pc.z);
+      float cr = cos(ROLL2), sr = sin(ROLL2);
+      uv = mat2(cr, -sr, sr, cr) * uv;                 // 15° roll (kara delikle aynı)
+      uv.x /= uAspect;
+      return vec4(uv, 0.0, 1.0);
+    }`;
+  // power butonu -> ring'e DÜZ çekiliş (spiral yok), 3B
+  const PVERT = PROJ + `
+    uniform float uBurst;
     attribute float aAngle, aSeed, aRing;
     varying float vA;
     void main(){
-      float Rr = (aRing > 0.5) ? 0.46 : mix(0.40, 0.08, aSeed);     // halka / güç ikonu çizgisi
-      float a0 = (aRing > 0.5) ? aAngle : (1.5708 + (aSeed - 0.5) * 0.6);
+      float Rb = 4.1;                                  // power butonu (ekrana bakan halka)
+      vec3 start = rotY(uYaw) * rotX(uPitch) * vec3(cos(aAngle)*Rb, sin(aAngle)*Rb, 0.0);
+      float Rr = 2.6 + aSeed * 0.3;                    // kara delik ringi (y=0 düzlemi)
+      vec3 endp = vec3(cos(aAngle)*Rr, 0.0, sin(aAngle)*Rr);
       float e = 1.0 - pow(1.0 - uBurst, 1.6);
-      // patlama YOK: çevredeki ışığa doğru içe çekil + hafif spiral, yavaşça sön
-      float r   = mix(Rr, 0.16, e);
-      float ang = a0 + e * 2.2;
-      vec2 pos = vec2(cos(ang), sin(ang)) * r;
-      pos.x /= uAspect;
-      gl_Position = vec4(pos, 0.0, 1.0);
-      gl_PointSize = mix(2.6, 0.5, e) * 2.0;          // küçülerek
-      vA = (1.0 - uBurst) * 0.9;                       // yavaşça sön
+      gl_Position = project(mix(start, endp, e));
+      gl_PointSize = mix(2.6, 0.7, e) * 2.0;
+      vA = 1.0 - uBurst;
     }`;
-  const PFRAG = `
-    precision mediump float;
-    varying float vA;
-    void main(){
-      float d = distance(gl_PointCoord, vec2(0.5));
-      float a = smoothstep(0.5, 0.0, d) * vA;
-      if (a < 0.01) discard;
-      gl_FragColor = vec4(vec3(1.0), a);
-    }`;
-
-  // --- ring çevresinde dönen ambient parçacıklar (yoktan oluş -> 3sn dön -> küçül -> yok) ---
-  const AVERT = `
-    uniform float uTime, uActive, uAspect;
+  // ring ÜZERİNDE dönen ambient parçacıklar (3B): yoktan -> 3sn dön -> küçülüp yok
+  const AVERT = PROJ + `
+    uniform float uTime, uActive;
     attribute float aBase, aSeed, aOuter;
     varying float vA;
     void main(){
-      float life = fract(uTime / 3.0 + aSeed);            // 3 saniyelik döngü
-      float r   = mix(0.30, 0.40, aOuter);                // ring üstü / ring dışı
-      float ang = aBase + uTime * 0.45;                   // yavaş dönüş
-      vec2 pos = vec2(cos(ang), sin(ang)) * r;
-      pos.x /= uAspect;
-      float cr = cos(0.2618), sr = sin(0.2618);
-      pos = mat2(cr, -sr, sr, cr) * pos;                  // 15 derece roll (kara delikle hizalı)
-      gl_Position = vec4(pos, 0.0, 1.0);
-      float fade = sin(life * 3.14159265);                // yoktan belir -> sön
-      gl_PointSize = (0.6 + 2.4 * fade) * 1.7;            // büyüyüp küçülür
+      float life = fract(uTime / 3.0 + aSeed);
+      float Rr = mix(2.45, 2.95, aOuter);              // ring bandı üzerinde
+      float ang = aBase + uTime * 0.5;
+      vec3 P = vec3(cos(ang)*Rr, 0.0, sin(ang)*Rr);
+      gl_Position = project(P);
+      float fade = sin(life * 3.14159265);
+      gl_PointSize = (0.6 + 2.2 * fade) * 1.8;
       vA = fade * uActive;
     }`;
-  const AFRAG = `
+  const PFX = `
     precision mediump float;
     varying float vA;
     void main(){
@@ -254,10 +254,14 @@
     points.visible = burst < 1.0;
     pMat.uniforms.uBurst.value = burst;
     pMat.uniforms.uTime.value = t;
+    pMat.uniforms.uYaw.value = yaw;
+    pMat.uniforms.uPitch.value = pitch;
 
     aPoints.visible = reveal > 0.05;
     aMat.uniforms.uTime.value = t;
     aMat.uniforms.uActive.value = active;
+    aMat.uniforms.uYaw.value = yaw;
+    aMat.uniforms.uPitch.value = pitch;
 
     renderer.render(scene, camera);
   }
@@ -303,8 +307,8 @@
     pg.setAttribute("aSeed", new THREE.BufferAttribute(pSeed, 1));
     pg.setAttribute("aRing", new THREE.BufferAttribute(pRing, 1));
     pMat = new THREE.ShaderMaterial({
-      uniforms: { uBurst: { value: 1 }, uAspect: { value: 1 }, uTime: { value: 0 } },
-      vertexShader: PVERT, fragmentShader: PFRAG,
+      uniforms: { uBurst: { value: 1 }, uAspect: { value: 1 }, uTime: { value: 0 }, uYaw: { value: 0 }, uPitch: { value: 0.12 } },
+      vertexShader: PVERT, fragmentShader: PFX,
       transparent: true, depthTest: false, depthWrite: false, blending: THREE.NormalBlending,
     });
     points = new THREE.Points(pg, pMat); points.visible = false; points.renderOrder = 2; scene.add(points);
@@ -320,8 +324,8 @@
     ag.setAttribute("aSeed", new THREE.BufferAttribute(aSeed, 1));
     ag.setAttribute("aOuter", new THREE.BufferAttribute(aOuter, 1));
     aMat = new THREE.ShaderMaterial({
-      uniforms: { uTime: { value: 0 }, uActive: { value: 0 }, uAspect: { value: 1 } },
-      vertexShader: AVERT, fragmentShader: AFRAG,
+      uniforms: { uTime: { value: 0 }, uActive: { value: 0 }, uAspect: { value: 1 }, uYaw: { value: 0 }, uPitch: { value: 0.12 } },
+      vertexShader: AVERT, fragmentShader: PFX,
       transparent: true, depthTest: false, depthWrite: false, blending: THREE.NormalBlending,
     });
     aPoints = new THREE.Points(ag, aMat); aPoints.renderOrder = 3; scene.add(aPoints);
