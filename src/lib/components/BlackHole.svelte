@@ -12,8 +12,7 @@
 
   let mx = 0, my = 0;
   let yaw = 0, pitch = 0.25;
-  // pcount: parçacıkların teker teker beliriş ilerlemesi (0->1). Disk/ring bundan sonra gelir.
-  let pcount = 0, pcountTarget = 0;
+  let active = 0, activeTarget = 0;
 
   // CANLI AYAR sliderları (değeri okuyup bana söyle)
   let rollDeg = $state(-15);  // ekran-dik eksen eğimi (derece)
@@ -136,18 +135,24 @@
 
   // tek parçacık sistemi: 30 parçacık, ring üstünde 3B döner, teker teker belirir/yok olur
   const PART_VERT = PROJ + `
-    uniform float uTime, uPcount, uRing, uBlackR;
-    attribute float aBase, aSeed, aRad, aBlack;
+    uniform float uTime, uActive, uRing, uBlackR, uLife;
+    attribute float aSeed, aIndex, aBlack;
     varying float vA, vBlack;
+    float hash(float n){ return fract(sin(n) * 43758.5453); }
     void main(){
-      float r = (aBlack > 0.5) ? uBlackR * mix(0.8, 1.2, aRad)   // siyah: diskin beyazı üstünde
-                               : uRing  * mix(0.82, 1.0, aRad);  // beyaz: ring üzerinde
-      float ang = aBase + uTime * 7.0 * pow(r, -1.5);             // yön çevrildi + içe yakın daha hızlı (Kepler)
+      float ph  = uTime / uLife + aSeed;                 // yaşam fazı
+      float cyc = floor(ph);                              // hangi döngü (her döngü YENİ konum)
+      float life = fract(ph);                             // 0..1
+      float h1 = hash(cyc + aIndex * 1.7);
+      float h2 = hash(cyc * 1.31 + aIndex * 2.9 + 5.0);
+      float baseR = (aBlack > 0.5) ? uBlackR : uRing;
+      float r = baseR * mix(0.85, 1.15, h1);
+      float ang = h2 * 6.2831853 + uTime * 7.0 * pow(r, -1.5);   // dönüş (içe yakın daha hızlı)
       vec3 P = vec3(cos(ang) * r, 0.0, sin(ang) * r);
       gl_Position = project(P);
-      float app = smoothstep(aSeed, aSeed + 0.10, uPcount);       // teker teker beliriş/yok
-      gl_PointSize = (0.5 + 3.2 * app) * 1.7;                      // büyüyerek belir / küçülerek yok
-      vA = app;
+      float grow = sin(life * 3.14159265);               // küçükten büyüyüp -> küçülerek yok
+      gl_PointSize = (0.4 + 3.6 * grow) * 1.7;
+      vA = grow * smoothstep(0.0, 0.2, uActive);
       vBlack = aBlack;
     }`;
   const PART_FRAG = `
@@ -162,7 +167,7 @@
     }`;
 
   $effect(() => {
-    pcountTarget = (app.status === "on" || app.status === "connecting") ? 1 : 0;
+    activeTarget = (app.status === "on" || app.status === "connecting") ? 1 : 0;
   });
 
   function size() {
@@ -184,9 +189,8 @@
     pitch += ((0.20 + my * 0.41) - pitch) * 0.05;   // dikey hareket ~5° azaltıldı, hafif yan
     pitch = Math.max(0.0, Math.min(0.88, pitch));
 
-    // pcount yavaş ilerler -> parçacıklar teker teker
-    pcount += (pcountTarget - pcount) * 0.04;
-    const reveal = Math.max(0, Math.min(1, (pcount - 0.6) / 0.4)); // disk/ring parçacıklardan SONRA
+    active += (activeTarget - active) * 0.05;
+    const reveal = Math.max(0, Math.min(1, (active - 0.3) / 0.7)); // disk/ring biraz sonra
 
     const rollRad = (rollDeg * Math.PI) / 180;
     mat.uniforms.uTime.value = t;
@@ -197,13 +201,13 @@
     mat.uniforms.uRoll.value = rollRad;
 
     pMat.uniforms.uTime.value = t;
-    pMat.uniforms.uPcount.value = pcount;
+    pMat.uniforms.uActive.value = active;
     pMat.uniforms.uYaw.value = yaw;
     pMat.uniforms.uPitch.value = pitch;
     pMat.uniforms.uRoll.value = rollRad;
     pMat.uniforms.uRing.value = ringR;
     pMat.uniforms.uBlackR.value = blackR;
-    points.visible = pcount > 0.001;
+    points.visible = active > 0.001;
 
     renderer.render(scene, camera);
   }
@@ -230,27 +234,25 @@
     });
     scene.add(new THREE.Mesh(geo, mat));
 
-    // 30 parçacık: ~22 beyaz (ring) + ~8 siyah (beyaz diskin üstünde)
-    const N = 30;
+    // 60 parçacık: 40 beyaz (ring) + 20 siyah (beyaz diskin üstünde) — sürekli yaşam döngüsü
+    const N = 60;
     const pg = new THREE.BufferGeometry();
-    const aBase = new Float32Array(N), aSeed = new Float32Array(N), aRad = new Float32Array(N), aBlack = new Float32Array(N);
+    const aSeed = new Float32Array(N), aIndex = new Float32Array(N), aBlack = new Float32Array(N);
     const dum = new Float32Array(N * 3);
     for (let i = 0; i < N; i++) {
-      aBase[i] = Math.random() * Math.PI * 2;
-      aSeed[i] = i / N;                    // teker teker (sıralı eşik)
-      aRad[i] = Math.random();
-      aBlack[i] = i >= N - 8 ? 1 : 0;      // son 8 siyah
+      aSeed[i] = Math.random();            // yaşam fazı offseti (asenkron)
+      aIndex[i] = i + 1;
+      aBlack[i] = i >= N - 20 ? 1 : 0;     // son 20 siyah
     }
     pg.setAttribute("position", new THREE.BufferAttribute(dum, 3));
-    pg.setAttribute("aBase", new THREE.BufferAttribute(aBase, 1));
     pg.setAttribute("aSeed", new THREE.BufferAttribute(aSeed, 1));
-    pg.setAttribute("aRad", new THREE.BufferAttribute(aRad, 1));
+    pg.setAttribute("aIndex", new THREE.BufferAttribute(aIndex, 1));
     pg.setAttribute("aBlack", new THREE.BufferAttribute(aBlack, 1));
     pMat = new THREE.ShaderMaterial({
       uniforms: {
-        uTime: { value: 0 }, uPcount: { value: 0 }, uAspect: { value: 1 },
+        uTime: { value: 0 }, uActive: { value: 0 }, uAspect: { value: 1 }, uLife: { value: 3.5 },
         uYaw: { value: 0 }, uPitch: { value: 0.25 }, uRoll: { value: 0 },
-        uRing: { value: 7.5 }, uBlackR: { value: 3.5 },
+        uRing: { value: 7.5 }, uBlackR: { value: 3.8 },
       },
       vertexShader: PART_VERT, fragmentShader: PART_FRAG,
       transparent: true, depthTest: false, depthWrite: false, blending: THREE.NormalBlending,
