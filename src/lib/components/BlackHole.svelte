@@ -253,15 +253,15 @@
     });
     scene.add(new THREE.Mesh(geo, mat));
 
-    // 180 parçacık: 120 beyaz (ring) + 60 siyah (beyaz diskin üstünde) — sürekli yaşam döngüsü
-    const N = 180;
+    // 198 parçacık: 168 beyaz (1.4x) + 30 siyah (yarı) — sürekli yaşam döngüsü
+    const N = 198;
     const pg = new THREE.BufferGeometry();
     const aSeed = new Float32Array(N), aIndex = new Float32Array(N), aBlack = new Float32Array(N);
     const dum = new Float32Array(N * 3);
     for (let i = 0; i < N; i++) {
       aSeed[i] = Math.random();            // yaşam fazı offseti (asenkron)
       aIndex[i] = i + 1;
-      aBlack[i] = i >= N - 60 ? 1 : 0;     // son 60 siyah
+      aBlack[i] = i >= N - 30 ? 1 : 0;     // son 30 siyah
     }
     pg.setAttribute("position", new THREE.BufferAttribute(dum, 3));
     pg.setAttribute("aSeed", new THREE.BufferAttribute(aSeed, 1));
