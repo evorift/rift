@@ -7,17 +7,19 @@
   let raf = 0;
   let renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.OrthographicCamera;
   let mat: THREE.ShaderMaterial;
+  let pMat: THREE.ShaderMaterial, points: THREE.Points;
   const clock = new THREE.Clock();
 
   // mouse-driven orbit targets + lerped state
   let mx = 0, my = 0;
   let yaw = 0, pitch = 0.12;
   let active = 0, activeTarget = 0;
+  let reveal = 0, revealTarget = 0;
+  // parçacık geçişi (her aç/kapa'da 0->1 patlama)
+  let burst = 1, burstActive = false;
 
   // render the heavy raymarch at reduced internal resolution, CSS upscales.
-  // NOTE: resolution is driven ONLY through this SCALE (setPixelRatio(1) below),
-  // so there is no double-scaling with devicePixelRatio.
-  const SCALE = 0.72;
+  const SCALE = 0.9;
 
   const VERT = `
     void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }`;
@@ -31,6 +33,7 @@
     uniform float uYaw;
     uniform float uPitch;
     uniform float uActive;
+    uniform float uReveal;   // 0 = hidden (power-button state), 1 = full black hole
 
     const int   STEPS  = 300;      // affine-param integration steps
     const float DT     = 0.10;     // base step (adaptively scaled by radius)
@@ -39,6 +42,7 @@
     const float DOUT   = 6.0;      // disk outer radius (compact, fits zoomed frame)
     const float ESCAPE = 30.0;     // ray escaped to infinity
     const float PI     = 3.14159265;
+    const float ROLL   = 0.2618;   // 15 derece ekran-dik eksen eğimi
 
     mat3 rotX(float a){ float c=cos(a), s=sin(a); return mat3(1.,0.,0., 0.,c,-s, 0.,s,c); }
     mat3 rotY(float a){ float c=cos(a), s=sin(a); return mat3(c,0.,s, 0.,1.,0., -s,0.,c); }
@@ -53,6 +57,9 @@
     void main(){
       // aspect-correct, y-normalized screen coords centered at 0
       vec2 uv = (gl_FragCoord.xy * 2.0 - uRes) / uRes.y;
+      // 15 derece roll (ekran-dik eksen)
+      float cr = cos(ROLL), sr = sin(ROLL);
+      uv = mat2(cr, -sr, sr, cr) * uv;
 
       // orbit camera: rotate a fixed basis by yaw/pitch
       mat3 R = rotY(uYaw) * rotX(uPitch);
@@ -145,11 +152,48 @@
       float ring = smoothstep(0.16, 0.0, abs(minR - 1.5)) * (1.0 - hitHorizon);
       vec3  outRGB = col * a + vec3(ring);
       float outA   = clamp(max(a, ring), 0.0, 1.0);
-      gl_FragColor = vec4(outRGB, outA);
+      // uReveal: 0 -> tamamen şeffaf (power-button durumu), 1 -> tam kara delik
+      gl_FragColor = vec4(outRGB, outA) * uReveal;
     }`;
 
+  // --- power-button -> particles geçiş katmanı (clip-space, kameradan bağımsız) ---
+  const PVERT = `
+    uniform float uBurst, uAspect;
+    attribute float aAngle, aSeed, aRing;
+    varying float vA;
+    void main(){
+      float Rr = 0.46;
+      vec2 home, dir;
+      if (aRing > 0.5){
+        home = vec2(cos(aAngle), sin(aAngle)) * Rr;   // ince halka
+        dir  = vec2(cos(aAngle), sin(aAngle));
+      } else {
+        home = vec2(0.0, mix(0.40, 0.08, aSeed));      // güç ikonu dikey çizgisi
+        dir  = normalize(vec2((aSeed - 0.5) * 0.5, 0.9));
+      }
+      float e = 1.0 - pow(1.0 - uBurst, 2.0);          // ease-out patlama
+      vec2 pos = home + dir * e * (0.45 + aSeed * 0.5);
+      pos.x /= uAspect;
+      gl_Position = vec4(pos, 0.0, 1.0);
+      gl_PointSize = mix(3.5, 1.0, uBurst) * 2.0;
+      vA = 1.0 - uBurst;
+    }`;
+  const PFRAG = `
+    precision mediump float;
+    varying float vA;
+    void main(){
+      float d = distance(gl_PointCoord, vec2(0.5));
+      float a = smoothstep(0.5, 0.0, d) * vA;
+      if (a < 0.01) discard;
+      gl_FragColor = vec4(vec3(1.0), a);
+    }`;
+
+  let prevStatus = app.status;
   $effect(() => {
-    activeTarget = (app.status === "on" || app.status === "connecting") ? 1 : 0;
+    const on = app.status === "on" || app.status === "connecting";
+    activeTarget = on ? 1 : 0;
+    revealTarget = on ? 1 : 0;
+    if (app.status !== prevStatus) { burst = 0; burstActive = true; prevStatus = app.status; }
   });
 
   function size() {
@@ -158,6 +202,7 @@
     renderer.domElement.style.width = w + "px";
     renderer.domElement.style.height = h + "px";
     mat.uniforms.uRes.value.set(w * SCALE, h * SCALE);
+    if (pMat) pMat.uniforms.uAspect.value = w / h;
   }
 
   function animate() {
@@ -171,11 +216,19 @@
     // near edge-on (Interstellar look); small range so the disk stays a thin lensed band
     pitch = Math.max(0.02, Math.min(0.5, pitch));
     active += (activeTarget - active) * 0.05;
+    reveal += (revealTarget - reveal) * 0.06;
+    if (burstActive) { burst += 0.02; if (burst >= 1) { burst = 1; burstActive = false; } }
 
     mat.uniforms.uTime.value = t;
     mat.uniforms.uYaw.value = yaw;
     mat.uniforms.uPitch.value = pitch;
     mat.uniforms.uActive.value = active;
+    mat.uniforms.uReveal.value = reveal;
+
+    points.visible = burst < 1.0;
+    pMat.uniforms.uBurst.value = burst;
+    pMat.uniforms.uTime.value = t;
+
     renderer.render(scene, camera);
   }
 
@@ -197,6 +250,7 @@
         uYaw:    { value: 0 },
         uPitch:  { value: 0.12 },
         uActive: { value: 0 },
+        uReveal: { value: 0 },
       },
       vertexShader: VERT,
       fragmentShader: FRAG,
@@ -207,6 +261,23 @@
       blending: THREE.NormalBlending,
     });
     scene.add(new THREE.Mesh(geo, mat));
+
+    // power-button -> particle geçiş katmanı
+    const NP = 700;
+    const pg = new THREE.BufferGeometry();
+    const pAng = new Float32Array(NP), pSeed = new Float32Array(NP), pRing = new Float32Array(NP);
+    const pdum = new Float32Array(NP * 3);
+    for (let i = 0; i < NP; i++) { pAng[i] = Math.random() * Math.PI * 2; pSeed[i] = Math.random(); pRing[i] = i < NP * 0.85 ? 1 : 0; }
+    pg.setAttribute("position", new THREE.BufferAttribute(pdum, 3));
+    pg.setAttribute("aAngle", new THREE.BufferAttribute(pAng, 1));
+    pg.setAttribute("aSeed", new THREE.BufferAttribute(pSeed, 1));
+    pg.setAttribute("aRing", new THREE.BufferAttribute(pRing, 1));
+    pMat = new THREE.ShaderMaterial({
+      uniforms: { uBurst: { value: 1 }, uAspect: { value: 1 }, uTime: { value: 0 } },
+      vertexShader: PVERT, fragmentShader: PFRAG,
+      transparent: true, depthTest: false, depthWrite: false, blending: THREE.NormalBlending,
+    });
+    points = new THREE.Points(pg, pMat); points.visible = false; points.renderOrder = 2; scene.add(points);
 
     // seed initial state consistently with the $effect (treat 'connecting' as on)
     activeTarget = (app.status === "on" || app.status === "connecting") ? 1 : 0;
@@ -243,9 +314,23 @@
   });
 </script>
 
-<button class="bh" bind:this={host} onclick={() => app.toggle()} aria-label="Kara delik · aç/kapat"></button>
+<button class="bh" bind:this={host} onclick={() => app.toggle()} aria-label="Kara delik · aç/kapat">
+  <svg class="power" class:show={app.status === "off"} viewBox="0 0 100 100" aria-hidden="true">
+    <circle class="rim" cx="50" cy="50" r="46" />
+    <line class="stem" x1="50" y1="27" x2="50" y2="47" />
+    <path class="arc" d="M34 37 A20 20 0 1 0 66 37" />
+  </svg>
+</button>
 
 <style>
-  .bh { width: 100%; height: 100%; border: none; background: transparent; cursor: pointer; padding: 0; display: block; }
-  :global(.bh canvas) { display: block; width: 100% !important; height: 100% !important; }
+  .bh { position: relative; width: 100%; height: 100%; border: none; background: transparent; cursor: pointer; padding: 0; display: block; }
+  :global(.bh canvas) { position: absolute; inset: 0; z-index: 1; display: block; width: 100% !important; height: 100% !important; }
+  .power {
+    position: absolute; inset: 0; margin: auto; width: 60%; height: 60%; z-index: 2;
+    pointer-events: none; opacity: 0; transform: scale(.9);
+    transition: opacity .3s ease, transform .3s ease;
+  }
+  .power.show { opacity: 1; transform: scale(1); }
+  .power .rim { fill: none; stroke: #fff; stroke-width: 1.6; opacity: .55; }
+  .power .stem, .power .arc { fill: none; stroke: #fff; stroke-width: 5; stroke-linecap: round; }
 </style>
