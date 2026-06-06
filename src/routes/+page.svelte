@@ -1,6 +1,6 @@
 <script lang="ts">
   import NavRail from "$lib/components/NavRail.svelte";
-  import ParticleEmblem from "$lib/components/ParticleEmblem.svelte";
+  import RiftPortal3D from "$lib/components/RiftPortal3D.svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
 
@@ -67,10 +67,12 @@
     </header>
 
     <section class="hero">
-      <ParticleEmblem {status} onToggle={toggleBoost} />
-
+      <div class="rift-stage"><RiftPortal3D {status} onToggle={toggleBoost} /></div>
       <h2 class="hero-title">{heroTitle}</h2>
       <p class="hero-sub">{heroSub}</p>
+      {#if status === "on"}
+        <button class="stop" onclick={toggleBoost}>Rift'i kapat</button>
+      {/if}
     </section>
 
     <section class="stats">
@@ -99,9 +101,16 @@
   .status-on { color: var(--green); }
 
   /* HERO — ortalı */
-  .hero { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 320px; }
-  .hero-title { font-size: 30px; font-weight: 800; letter-spacing: .3px; margin-top: 26px; }
+  .hero { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
+  .rift-stage { width: 100%; max-width: 580px; height: 360px; }
+  .hero-title { font-size: 28px; font-weight: 800; letter-spacing: .3px; margin-top: 14px; }
   .hero-sub { color: var(--text-muted); max-width: 460px; text-align: center; line-height: 1.5; }
+  .stop {
+    margin-top: 14px; padding: 8px 18px; border-radius: 999px; cursor: pointer;
+    background: transparent; border: 1px solid var(--border); color: var(--text-muted);
+    font-weight: 600; transition: background .15s, color .15s, border-color .15s;
+  }
+  .stop:hover { background: var(--bg-hover); color: var(--text); border-color: #2a3346; }
 
   /* stat kartları */
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 10px; }
