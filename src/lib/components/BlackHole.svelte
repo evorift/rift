@@ -8,28 +8,24 @@
   let renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.OrthographicCamera;
   let mat: THREE.ShaderMaterial;
   let pMat: THREE.ShaderMaterial, points: THREE.Points;
-  let aMat: THREE.ShaderMaterial, aPoints: THREE.Points;
   const clock = new THREE.Clock();
 
-  // mouse-driven orbit targets + lerped state
   let mx = 0, my = 0;
-  let yaw = 0, pitch = 0.12;
-  let active = 0, activeTarget = 0;
-  let reveal = 0, revealTarget = 0;
-  // parçacık geçişi (her aç/kapa'da 0->1 patlama)
-  let burst = 1, burstActive = false;
-  // CANLI AYAR sliderları (değeri okuyup bana söyle)
-  let rollDeg = $state(-15);   // ekran-dik eksen eğimi (derece)
-  let ringR = $state(5.4);     // parçacık ring yarıçapı (dünya birimi)
+  let yaw = 0, pitch = 0.25;
+  // pcount: parçacıkların teker teker beliriş ilerlemesi (0->1). Disk/ring bundan sonra gelir.
+  let pcount = 0, pcountTarget = 0;
 
-  // render the heavy raymarch at reduced internal resolution, CSS upscales.
+  // CANLI AYAR sliderları (değeri okuyup bana söyle)
+  let rollDeg = $state(-15);  // ekran-dik eksen eğimi (derece)
+  let ringR = $state(7.5);    // beyaz parçacık ring yarıçapı
+  let blackR = $state(3.5);   // siyah parçacık yarıçapı (beyaz diskin üstünde)
+
   const SCALE = 0.9;
 
   const VERT = `
     void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }`;
 
   // ---- Schwarzschild-approx geodesic raymarcher (units: r_s = 1) ----
-  // STEPS must be a const int (GLSL ES 1.00 requires constant loop bounds).
   const FRAG = `
     precision highp float;
     uniform vec2  uRes;
@@ -37,190 +33,136 @@
     uniform float uYaw;
     uniform float uPitch;
     uniform float uActive;
-    uniform float uReveal;   // 0 = hidden (power-button state), 1 = full black hole
-    uniform float uRoll;     // ekran-dik eksen eğimi (radyan)
+    uniform float uReveal;
+    uniform float uRoll;
 
-    const int   STEPS  = 300;      // affine-param integration steps
-    const float DT     = 0.10;     // base step (adaptively scaled by radius)
-    const float RS     = 1.0;      // event horizon radius (pure black)
-    const float DIN    = 2.2;      // disk inner radius (hugs the lensed shadow)
-    const float DOUT   = 6.0;      // disk outer radius (compact, fits zoomed frame)
-    const float ESCAPE = 30.0;     // ray escaped to infinity
+    const int   STEPS  = 300;
+    const float DT     = 0.10;
+    const float RS     = 1.0;
+    const float DIN    = 2.2;
+    const float DOUT   = 6.0;
+    const float ESCAPE = 30.0;
     const float PI     = 3.14159265;
 
     mat3 rotX(float a){ float c=cos(a), s=sin(a); return mat3(1.,0.,0., 0.,c,-s, 0.,s,c); }
     mat3 rotY(float a){ float c=cos(a), s=sin(a); return mat3(c,0.,s, 0.,1.,0., -s,0.,c); }
 
-    // tight single-piece radial mask for the white disk (crisp inner + outer rims)
     float diskMask(float r){
-      float inner = smoothstep(DIN, DIN + 0.18, r);   // crisp inner rim (gets lensed up)
-      float outer = smoothstep(DOUT, DOUT - 0.35, r); // crisp outer rim, minimal feather
+      float inner = smoothstep(DIN, DIN + 0.18, r);
+      float outer = smoothstep(DOUT, DOUT - 0.35, r);
       return inner * outer;
     }
 
     void main(){
-      // aspect-correct, y-normalized screen coords centered at 0
       vec2 uv = (gl_FragCoord.xy * 2.0 - uRes) / uRes.y;
-      // roll (ekran-dik eksen, uniform)
       float cr = cos(uRoll), sr = sin(uRoll);
       uv = mat2(cr, -sr, sr, cr) * uv;
 
-      // orbit camera: rotate a fixed basis by yaw/pitch
       mat3 R = rotY(uYaw) * rotX(uPitch);
-      vec3 ro = R * vec3(0.0, 0.0, 18.0);           // camera pulled back -> smaller model in frame
-      vec3 rd = R * normalize(vec3(uv, -2.0));      // wider FOV -> more empty space around the hole
+      vec3 ro = R * vec3(0.0, 0.0, 18.0);
+      vec3 rd = R * normalize(vec3(uv, -2.0));
 
-      // geodesic integration variables
       vec3  pos = ro;
-      vec3  vel = rd;                               // unit direction (kept unit each step)
-      // conserved angular momentum^2 from initial conditions
+      vec3  vel = rd;
       vec3  cprod = cross(pos, vel);
       float h2 = dot(cprod, cprod);
 
-      vec3  col   = vec3(0.0);   // composited disk radiance (front-to-back)
-      float minR  = 100.0;       // closest approach to photon sphere -> crisp ring (no haze)
-      float transmit = 1.0;      // remaining transparency (1 = clear, 0 = fully covered)
+      vec3  col   = vec3(0.0);
+      float minR  = 100.0;
+      float transmit = 1.0;
       float hitHorizon = 0.0;
       vec3  oldpos = pos;
-
-      // disk surface brightness: dim-but-legible when off, full when on.
-      // floor raised so orbiting always reveals the lensed disk regardless of state.
       float diskGain = clamp(uActive, 0.0, 1.0);
 
       for (int i = 0; i < STEPS; i++){
         oldpos = pos;
-
-        // adaptive step: fine near the hole (strong field / thin disk plane),
-        // coarse far away. Catches the second equatorial crossing that forms the
-        // over-the-top / under-the-bottom lensed arc.
         float r2o = dot(pos, pos);
         float ro_ = sqrt(max(r2o, 1e-6));
         float dt  = DT * clamp(ro_ * 0.35, 0.35, 1.6);
 
-        // advance position, bend velocity toward the hole, renormalize direction.
         pos += vel * dt;
         float r2 = dot(pos, pos);
         float r  = sqrt(max(r2, 1e-6));
 
-        // Schwarzschild null-geodesic fictitious force: -1.5 * h2 * pos / r^5.
-        // Base of pow() is guarded positive. Clamp magnitude to bound the
-        // near-field blow-up (NaN-safe).
         vec3  acc = -1.5 * h2 * pos / pow(max(r2, 1e-6), 2.5);
         float am  = min(length(acc), 50.0);
         acc = am * normalize(acc + vec3(1e-9));
         vel += acc * dt;
-        // null geodesic -> photon speed constant; keep |vel| = 1 so the bend is
-        // physically consistent and step-rate independent.
         vel = normalize(vel);
 
-        // event horizon: swallowed -> pure black, opaque, stop
-        if (r < RS){
-          hitHorizon = 1.0;
-          transmit = 0.0;
-          break;
-        }
-
-        // track closest approach to the photon sphere (~1.5) -> single crisp ring later
+        if (r < RS){ hitHorizon = 1.0; transmit = 0.0; break; }
         minR = min(minR, r);
 
-        // accretion disk lives in the y = 0 equatorial plane.
-        // detect plane crossing by sign change of y between consecutive samples.
         if (oldpos.y * pos.y < 0.0){
-          float lambda = oldpos.y / (oldpos.y - pos.y);   // interp factor to y=0
-          vec3  hit = mix(oldpos, pos, lambda);           // exact crossing point
+          float lambda = oldpos.y / (oldpos.y - pos.y);
+          vec3  hit = mix(oldpos, pos, lambda);
           float rr  = length(hit.xz);
           float m   = diskMask(rr);
           if (m > 0.0){
-            // SINGLE-PIECE PURE WHITE disk: crisp + opaque, no color/doppler/gradient.
             float a = clamp(m * diskGain, 0.0, 1.0);
-            // ACCUMULATE (no break) so the bent ray can cross again ->
-            // secondary lensed image arcing over the top / under the bottom.
             col      += vec3(1.0) * a * transmit;
             transmit *= (1.0 - a);
           }
         }
 
-        if (transmit < 0.004) break;   // fully covered, early out
-        if (r > ESCAPE) break;          // escaped to infinity -> transparent bg
+        if (transmit < 0.004) break;
+        if (r > ESCAPE) break;
       }
 
-      // coverage alpha: opaque at horizon (black), otherwise 1 - transmit.
       float a = max(hitHorizon, 1.0 - transmit);
       a = clamp(a, 0.0, 1.0);
-
-      // pure black & white: crisp clamp (no rolloff -> no grey midtones)
       col = clamp(col, 0.0, 1.0);
 
-      // single crisp white photon ring at closest approach to the photon sphere (~1.5),
-      // only for rays that did NOT fall into the hole. No volumetric haze.
       float ring = smoothstep(0.16, 0.0, abs(minR - 1.5)) * (1.0 - hitHorizon);
       vec3  outRGB = col * a + vec3(ring);
       float outA   = clamp(max(a, ring), 0.0, 1.0);
-      // uReveal: 0 -> tamamen şeffaf (power-button durumu), 1 -> tam kara delik
       gl_FragColor = vec4(outRGB, outA) * uReveal;
     }`;
 
-  // --- power-button -> particles geçiş katmanı (clip-space, kameradan bağımsız) ---
-  // kara delik shader'ı ile AYNI kamera (D=18, focal=2, 15° roll) -> parçacıklar 3B uzayda hizalı
+  // kara delik ile AYNI kamera (D=18, focal=2, roll) -> parçacıklar 3B uzayda hizalı
   const PROJ = `
     uniform float uYaw, uPitch, uAspect, uRoll;
     const float CAMD = 18.0;
     mat3 rotX(float a){ float c=cos(a), s=sin(a); return mat3(1.,0.,0., 0.,c,-s, 0.,s,c); }
     mat3 rotY(float a){ float c=cos(a), s=sin(a); return mat3(c,0.,s, 0.,1.,0., -s,0.,c); }
     vec4 project(vec3 P){
-      vec3 Pc = rotX(-uPitch) * rotY(-uYaw) * P;      // world -> kamera çerçevesi
+      vec3 Pc = rotX(-uPitch) * rotY(-uYaw) * P;
       vec2 uv = 2.0 * Pc.xy / (CAMD - Pc.z);
       float cr = cos(uRoll), sr = sin(uRoll);
-      uv = mat2(cr, -sr, sr, cr) * uv;                 // roll (kara delikle aynı)
+      uv = mat2(cr, -sr, sr, cr) * uv;
       uv.x /= uAspect;
       return vec4(uv, 0.0, 1.0);
     }`;
-  // power butonu -> ring'e DÜZ çekiliş (spiral yok), 3B
-  const PVERT = PROJ + `
-    uniform float uBurst, uRing;
-    attribute float aAngle, aSeed, aRing;
-    varying float vA;
+
+  // tek parçacık sistemi: 30 parçacık, ring üstünde 3B döner, teker teker belirir/yok olur
+  const PART_VERT = PROJ + `
+    uniform float uTime, uPcount, uRing, uBlackR;
+    attribute float aBase, aSeed, aRad, aBlack;
+    varying float vA, vBlack;
     void main(){
-      float Rb = 4.1;                                  // power butonu (ekrana bakan halka)
-      vec3 start = rotY(uYaw) * rotX(uPitch) * vec3(cos(aAngle)*Rb, sin(aAngle)*Rb, 0.0);
-      float Rr = uRing + aSeed * 0.3;                  // kara delik ringi (y=0 düzlemi)
-      vec3 endp = vec3(cos(aAngle)*Rr, 0.0, sin(aAngle)*Rr);
-      float e = 1.0 - pow(1.0 - uBurst, 1.6);
-      gl_Position = project(mix(start, endp, e));
-      gl_PointSize = mix(2.6, 0.7, e) * 2.0;
-      vA = 1.0 - uBurst;
-    }`;
-  // ring ÜZERİNDE dönen ambient parçacıklar (3B): yoktan -> 3sn dön -> küçülüp yok
-  const AVERT = PROJ + `
-    uniform float uTime, uActive, uRing;
-    attribute float aBase, aSeed, aOuter;
-    varying float vA;
-    void main(){
-      float life = fract(uTime / 3.0 + aSeed);
-      float Rr = uRing * mix(0.92, 1.08, aOuter);      // ring bandı üzerinde
-      float ang = aBase + uTime * 0.5;
-      vec3 P = vec3(cos(ang)*Rr, 0.0, sin(ang)*Rr);
+      float r = (aBlack > 0.5) ? uBlackR * mix(0.8, 1.2, aRad)   // siyah: diskin beyazı üstünde
+                               : uRing  * mix(0.82, 1.0, aRad);  // beyaz: ring üzerinde
+      float ang = aBase - uTime * 0.4;                            // ters yön (ring ile aynı)
+      vec3 P = vec3(cos(ang) * r, 0.0, sin(ang) * r);
       gl_Position = project(P);
-      float fade = sin(life * 3.14159265);
-      gl_PointSize = (0.6 + 2.2 * fade) * 1.8;
-      vA = fade * uActive;
+      float app = smoothstep(aSeed, aSeed + 0.10, uPcount);       // teker teker beliriş/yok
+      gl_PointSize = (0.5 + 3.2 * app) * 1.7;                      // büyüyerek belir / küçülerek yok
+      vA = app;
+      vBlack = aBlack;
     }`;
-  const PFX = `
+  const PART_FRAG = `
     precision mediump float;
-    varying float vA;
+    varying float vA, vBlack;
     void main(){
       float d = distance(gl_PointCoord, vec2(0.5));
       float a = smoothstep(0.5, 0.0, d) * vA;
       if (a < 0.01) discard;
-      gl_FragColor = vec4(vec3(1.0), a);
+      vec3 col = mix(vec3(1.0), vec3(0.0), vBlack);               // beyaz / siyah
+      gl_FragColor = vec4(col, a);
     }`;
 
-  let prevStatus = app.status;
   $effect(() => {
-    const on = app.status === "on" || app.status === "connecting";
-    activeTarget = on ? 1 : 0;
-    revealTarget = on ? 1 : 0;
-    if (app.status !== prevStatus) { burst = 0; burstActive = true; prevStatus = app.status; }
+    pcountTarget = (app.status === "on" || app.status === "connecting") ? 1 : 0;
   });
 
   function size() {
@@ -230,53 +172,46 @@
     renderer.domElement.style.height = h + "px";
     mat.uniforms.uRes.value.set(w * SCALE, h * SCALE);
     if (pMat) pMat.uniforms.uAspect.value = w / h;
-    if (aMat) aMat.uniforms.uAspect.value = w / h;
   }
 
   function animate() {
     raf = requestAnimationFrame(animate);
     const t = clock.getElapsedTime();
+    const drift = Math.sin(t * 0.12) * 0.3;
 
-    // lerp orbit toward mouse target, plus a slow auto drift so it's never dead
-    const drift = Math.sin(t * 0.12) * 0.35;
-    // sağ-sol normal, yukarı-aşağı yarı miktar
+    // sağ-sol normal (yaw), yukarı-aşağı dikey döndürme (pitch, geniş aralık)
     yaw   += ((mx * 0.9 + drift) - yaw) * 0.05;
-    pitch += ((0.12 + my * 0.14) - pitch) * 0.05;
-    pitch = Math.max(0.04, Math.min(0.42, pitch));
-    active += (activeTarget - active) * 0.05;
-    reveal += (revealTarget - reveal) * 0.06;
-    if (burstActive) { burst += 0.012; if (burst >= 1) { burst = 1; burstActive = false; } } // yavaş
+    pitch += ((0.25 + my * 0.5) - pitch) * 0.05;
+    pitch = Math.max(0.0, Math.min(0.95, pitch));
 
+    // pcount yavaş ilerler -> parçacıklar teker teker
+    pcount += (pcountTarget - pcount) * 0.04;
+    const reveal = Math.max(0, Math.min(1, (pcount - 0.6) / 0.4)); // disk/ring parçacıklardan SONRA
+
+    const rollRad = (rollDeg * Math.PI) / 180;
     mat.uniforms.uTime.value = t;
     mat.uniforms.uYaw.value = yaw;
     mat.uniforms.uPitch.value = pitch;
-    mat.uniforms.uActive.value = active;
+    mat.uniforms.uActive.value = reveal;
     mat.uniforms.uReveal.value = reveal;
-    const rollRad = (rollDeg * Math.PI) / 180;
     mat.uniforms.uRoll.value = rollRad;
-    pMat.uniforms.uRoll.value = rollRad; pMat.uniforms.uRing.value = ringR;
-    aMat.uniforms.uRoll.value = rollRad; aMat.uniforms.uRing.value = ringR;
 
-    points.visible = burst < 1.0;
-    pMat.uniforms.uBurst.value = burst;
     pMat.uniforms.uTime.value = t;
+    pMat.uniforms.uPcount.value = pcount;
     pMat.uniforms.uYaw.value = yaw;
     pMat.uniforms.uPitch.value = pitch;
-
-    aPoints.visible = reveal > 0.05;
-    aMat.uniforms.uTime.value = t;
-    aMat.uniforms.uActive.value = active;
-    aMat.uniforms.uYaw.value = yaw;
-    aMat.uniforms.uPitch.value = pitch;
+    pMat.uniforms.uRoll.value = rollRad;
+    pMat.uniforms.uRing.value = ringR;
+    pMat.uniforms.uBlackR.value = blackR;
+    points.visible = pcount > 0.001;
 
     renderer.render(scene, camera);
   }
 
   onMount(() => {
     renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, premultipliedAlpha: true });
-    // single resolution control: rely on SCALE via setSize, not devicePixelRatio.
     renderer.setPixelRatio(1);
-    renderer.setClearColor(0x000000, 0); // transparent — no box
+    renderer.setClearColor(0x000000, 0);
     host.appendChild(renderer.domElement);
 
     scene = new THREE.Scene();
@@ -285,89 +220,61 @@
     const geo = new THREE.PlaneGeometry(2, 2);
     mat = new THREE.ShaderMaterial({
       uniforms: {
-        uRes:    { value: new THREE.Vector2(1, 1) },
-        uTime:   { value: 0 },
-        uYaw:    { value: 0 },
-        uPitch:  { value: 0.12 },
-        uActive: { value: 0 },
-        uReveal: { value: 0 },
-        uRoll:   { value: 0 },
+        uRes: { value: new THREE.Vector2(1, 1) }, uTime: { value: 0 },
+        uYaw: { value: 0 }, uPitch: { value: 0.25 },
+        uActive: { value: 0 }, uReveal: { value: 0 }, uRoll: { value: 0 },
       },
-      vertexShader: VERT,
-      fragmentShader: FRAG,
-      transparent: true,
-      depthTest: false,
-      depthWrite: false,
-      premultipliedAlpha: true,   // consistent with renderer + shader output
-      blending: THREE.NormalBlending,
+      vertexShader: VERT, fragmentShader: FRAG,
+      transparent: true, depthTest: false, depthWrite: false,
+      premultipliedAlpha: true, blending: THREE.NormalBlending,
     });
     scene.add(new THREE.Mesh(geo, mat));
 
-    // power-button -> particle geçiş katmanı
-    const NP = 700;
+    // 30 parçacık: ~22 beyaz (ring) + ~8 siyah (beyaz diskin üstünde)
+    const N = 30;
     const pg = new THREE.BufferGeometry();
-    const pAng = new Float32Array(NP), pSeed = new Float32Array(NP), pRing = new Float32Array(NP);
-    const pdum = new Float32Array(NP * 3);
-    for (let i = 0; i < NP; i++) { pAng[i] = Math.random() * Math.PI * 2; pSeed[i] = Math.random(); pRing[i] = i < NP * 0.85 ? 1 : 0; }
-    pg.setAttribute("position", new THREE.BufferAttribute(pdum, 3));
-    pg.setAttribute("aAngle", new THREE.BufferAttribute(pAng, 1));
-    pg.setAttribute("aSeed", new THREE.BufferAttribute(pSeed, 1));
-    pg.setAttribute("aRing", new THREE.BufferAttribute(pRing, 1));
+    const aBase = new Float32Array(N), aSeed = new Float32Array(N), aRad = new Float32Array(N), aBlack = new Float32Array(N);
+    const dum = new Float32Array(N * 3);
+    for (let i = 0; i < N; i++) {
+      aBase[i] = Math.random() * Math.PI * 2;
+      aSeed[i] = i / N;                    // teker teker (sıralı eşik)
+      aRad[i] = Math.random();
+      aBlack[i] = i >= N - 8 ? 1 : 0;      // son 8 siyah
+    }
+    pg.setAttribute("position", new THREE.BufferAttribute(dum, 3));
+    pg.setAttribute("aBase", new THREE.BufferAttribute(aBase, 1));
+    pg.setAttribute("aSeed", new THREE.BufferAttribute(aSeed, 1));
+    pg.setAttribute("aRad", new THREE.BufferAttribute(aRad, 1));
+    pg.setAttribute("aBlack", new THREE.BufferAttribute(aBlack, 1));
     pMat = new THREE.ShaderMaterial({
-      uniforms: { uBurst: { value: 1 }, uAspect: { value: 1 }, uTime: { value: 0 }, uYaw: { value: 0 }, uPitch: { value: 0.12 }, uRoll: { value: 0 }, uRing: { value: 5.4 } },
-      vertexShader: PVERT, fragmentShader: PFX,
+      uniforms: {
+        uTime: { value: 0 }, uPcount: { value: 0 }, uAspect: { value: 1 },
+        uYaw: { value: 0 }, uPitch: { value: 0.25 }, uRoll: { value: 0 },
+        uRing: { value: 7.5 }, uBlackR: { value: 3.5 },
+      },
+      vertexShader: PART_VERT, fragmentShader: PART_FRAG,
       transparent: true, depthTest: false, depthWrite: false, blending: THREE.NormalBlending,
     });
     points = new THREE.Points(pg, pMat); points.visible = false; points.renderOrder = 2; scene.add(points);
 
-    // ring çevresinde dönen ambient parçacıklar (ring üstü 10 + ring dışı 10)
-    const NA = 20;
-    const ag = new THREE.BufferGeometry();
-    const aBase = new Float32Array(NA), aSeed = new Float32Array(NA), aOuter = new Float32Array(NA);
-    const adum = new Float32Array(NA * 3);
-    for (let i = 0; i < NA; i++) { aBase[i] = Math.random() * Math.PI * 2; aSeed[i] = Math.random(); aOuter[i] = i < NA / 2 ? 0 : 1; }
-    ag.setAttribute("position", new THREE.BufferAttribute(adum, 3));
-    ag.setAttribute("aBase", new THREE.BufferAttribute(aBase, 1));
-    ag.setAttribute("aSeed", new THREE.BufferAttribute(aSeed, 1));
-    ag.setAttribute("aOuter", new THREE.BufferAttribute(aOuter, 1));
-    aMat = new THREE.ShaderMaterial({
-      uniforms: { uTime: { value: 0 }, uActive: { value: 0 }, uAspect: { value: 1 }, uYaw: { value: 0 }, uPitch: { value: 0.12 }, uRoll: { value: 0 }, uRing: { value: 5.4 } },
-      vertexShader: AVERT, fragmentShader: PFX,
-      transparent: true, depthTest: false, depthWrite: false, blending: THREE.NormalBlending,
-    });
-    aPoints = new THREE.Points(ag, aMat); aPoints.renderOrder = 3; scene.add(aPoints);
-
-    // seed initial state consistently with the $effect (treat 'connecting' as on)
-    activeTarget = (app.status === "on" || app.status === "connecting") ? 1 : 0;
-    active = activeTarget;
-
     size();
-    const ro = new ResizeObserver(size); ro.observe(host);
-
+    const obs = new ResizeObserver(size); obs.observe(host);
     const onMove = (e: PointerEvent) => {
       const r = host.getBoundingClientRect();
       mx = ((e.clientX - r.left) / r.width - 0.5) * 2;
       my = -((e.clientY - r.top) / r.height - 0.5) * 2;
     };
     host.addEventListener("pointermove", onMove);
-
-    const onVis = () => {
-      if (document.hidden) { cancelAnimationFrame(raf); raf = 0; }
-      else if (!raf) animate();
-    };
+    const onVis = () => { if (document.hidden) { cancelAnimationFrame(raf); raf = 0; } else if (!raf) animate(); };
     document.addEventListener("visibilitychange", onVis);
-
     animate();
 
     return () => {
-      cancelAnimationFrame(raf); ro.disconnect();
+      cancelAnimationFrame(raf); obs.disconnect();
       host.removeEventListener("pointermove", onMove);
       document.removeEventListener("visibilitychange", onVis);
-      geo.dispose(); mat.dispose();
-      renderer.dispose();
-      // free the GL context promptly and remove the orphaned canvas (HMR/remount leak)
-      renderer.forceContextLoss();
-      renderer.domElement.remove();
+      geo.dispose(); mat.dispose(); pg.dispose(); pMat.dispose();
+      renderer.dispose(); renderer.forceContextLoss(); renderer.domElement.remove();
     };
   });
 </script>
@@ -383,6 +290,7 @@
   <div class="dbg">
     <label>Roll <b>{rollDeg}°</b><input type="range" min="-45" max="45" step="1" bind:value={rollDeg} /></label>
     <label>Ring <b>{ringR.toFixed(1)}</b><input type="range" min="1" max="14" step="0.1" bind:value={ringR} /></label>
+    <label>Black <b>{blackR.toFixed(1)}</b><input type="range" min="1" max="10" step="0.1" bind:value={blackR} /></label>
   </div>
 </div>
 
