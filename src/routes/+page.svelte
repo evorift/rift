@@ -70,7 +70,7 @@
 
   /* HERO — kara delik butonu */
   .hero { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; }
-  .bh-stage { width: 340px; height: 340px; margin-bottom: 8px; }
+  .bh-stage { width: 240px; height: 240px; margin-bottom: 10px; }
   .hero-title { font-size: 26px; font-weight: 800; letter-spacing: .3px; }
   .hero-sub { color: var(--text-muted); max-width: 460px; text-align: center; line-height: 1.5; }
 

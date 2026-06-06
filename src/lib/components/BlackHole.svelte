@@ -36,7 +36,7 @@
     const float DT     = 0.10;     // base step (adaptively scaled by radius)
     const float RS     = 1.0;      // event horizon radius (pure black)
     const float DIN    = 2.2;      // disk inner radius (hugs the lensed shadow)
-    const float DOUT   = 7.0;      // disk outer radius
+    const float DOUT   = 6.0;      // disk outer radius (compact, fits zoomed frame)
     const float ESCAPE = 30.0;     // ray escaped to infinity
     const float PI     = 3.14159265;
 
@@ -57,7 +57,7 @@
       // orbit camera: rotate a fixed basis by yaw/pitch
       mat3 R = rotY(uYaw) * rotX(uPitch);
       vec3 ro = R * vec3(0.0, 0.0, 9.0);            // camera position (distance ~9)
-      vec3 rd = R * normalize(vec3(uv, -2.6));      // ray dir (~2.6 focal length)
+      vec3 rd = R * normalize(vec3(uv, -3.5));      // ray dir (zoomed in -> bigger, clearer hole)
 
       // geodesic integration variables
       vec3  pos = ro;
@@ -74,7 +74,7 @@
 
       // disk surface brightness: dim-but-legible when off, full when on.
       // floor raised so orbiting always reveals the lensed disk regardless of state.
-      float diskGain = mix(0.4, 1.0, clamp(uActive, 0.0, 1.0));
+      float diskGain = clamp(uActive, 0.0, 1.0);
 
       for (int i = 0; i < STEPS; i++){
         oldpos = pos;
@@ -125,19 +125,8 @@
           float rr  = length(hit.xz);
           float m   = diskMask(rr);
           if (m > 0.0){
-            // relativistic Doppler beaming: gas orbiting toward the camera is
-            // beamed bright, the receding side dim -> the iconic asymmetry.
-            vec3  vdir = normalize(vec3(-hit.z, 0.0, hit.x)); // tangential orbit dir
-            float beam = clamp(dot(vel, vdir) * 0.5 + 0.5, 0.0, 1.0);
-            float doppler = pow(beam, 2.2);                 // base guaranteed >= 0
-            // radial brightness: hotter / brighter toward the inner rim.
-            float radial = smoothstep(DOUT, DIN, rr);
-            // subtle azimuthal swirl so motion reads (stays monochrome white)
-            float ang = atan(hit.z, hit.x);
-            float swirl = 0.9 + 0.1 * sin(ang * 3.0 + uTime * 0.6 - rr * 1.2);
-            float bright = (0.25 + 0.9 * doppler) * (0.4 + 0.6 * radial) * swirl;
-            float a = m * bright * diskGain;                // per-crossing alpha
-            a = clamp(a, 0.0, 1.0);
+            // SINGLE-PIECE PURE WHITE disk: crisp + opaque, no color/doppler/gradient.
+            float a = clamp(m * diskGain, 0.0, 1.0);
             // ACCUMULATE (no break) so the bent ray can cross again ->
             // secondary lensed image arcing over the top / under the bottom.
             col      += vec3(1.0) * a * transmit;
@@ -153,9 +142,8 @@
       float a = max(hitHorizon, 1.0 - transmit);
       a = clamp(a, 0.0, 1.0);
 
-      // soft Reinhard rolloff on the disk so the Doppler bright/dim gradient is
-      // preserved instead of hard-clipping to a flat white plateau.
-      col = col / (1.0 + col);
+      // pure black & white: crisp clamp (no rolloff -> no grey midtones)
+      col = clamp(col, 0.0, 1.0);
 
       // premultiplied output. The photon ring is emissive (carries its own alpha),
       // so it is added AFTER premultiply and contributes to alpha via max(a, emis)
