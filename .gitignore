@@ -1,0 +1,28 @@
+# --- Node / frontend ---
+node_modules/
+dist/
+.vite/
+*.log
+
+# --- Rust / Tauri ---
+target/
+**/target/
+
+# --- Secrets / signing keys (ASLA commit etme) ---
+.env
+.env.*
+*.key
+*.pem
+*.tauri-signing*
+TAURI_SIGNING_*
+updater-*.key
+
+# --- Yerel planlama dökümanları (private kalsın) ---
+docs/
+
+# --- OS / editör ---
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
+*.swp

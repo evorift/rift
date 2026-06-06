@@ -1,0 +1,5 @@
+# GitHub "Sponsor" butonu. Kullanmadığın satırı sil.
+github: [evorift]        # GitHub Sponsors — github.com/sponsors üzerinden ETKİNLEŞTİRMEN gerekir
+# ko_fi: evorift         # Ko-fi hesabı açarsan bu satırı aç
+# patreon: evorift       # Patreon istersen aç
+custom: []               # ör. ["https://..."] ileride
