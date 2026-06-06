@@ -4,6 +4,12 @@ dist/
 .vite/
 *.log
 
+# --- SvelteKit (üretilen) ---
+.svelte-kit/
+/build/
+.output/
+.vercel/
+
 # --- Rust / Tauri ---
 target/
 **/target/
