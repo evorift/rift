@@ -2,13 +2,13 @@
    Rift — dark "tactical HUD" tema
    ============================================================ */
 :root {
-  /* yüzeyler */
-  --bg-base:     #0B0E14;
-  --bg-surface:  #12161F;
-  --bg-elevated: #1A1F2B;
-  --bg-hover:    #20283A;
-  --border:      #252B38;
-  --border-soft: #1c2230;
+  /* yüzeyler (daha koyu) */
+  --bg-base:     #04060A;
+  --bg-surface:  #090C12;
+  --bg-elevated: #0F131C;
+  --bg-hover:    #161B26;
+  --border:      #181D28;
+  --border-soft: #10141c;
 
   /* metin */
   --text:        #E6E9EF;
