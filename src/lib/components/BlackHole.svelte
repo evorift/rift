@@ -16,8 +16,8 @@
 
   // CANLI AYAR sliderları (değeri okuyup bana söyle)
   let rollDeg = $state(-15);  // ekran-dik eksen eğimi (derece)
-  let ringR = $state(7.5);    // beyaz parçacık ring yarıçapı
-  let blackR = $state(3.8);   // siyah parçacık yarıçapı (beyaz diskin üstünde)
+  let ringR = $state(6.9);    // beyaz parçacık ring yarıçapı
+  let blackR = $state(4.6);   // siyah parçacık yarıçapı (beyaz diskin üstünde)
 
   const SCALE = 0.9;
 
@@ -146,7 +146,8 @@
       float h1 = hash(cyc + aIndex * 1.7);
       float h2 = hash(cyc * 1.31 + aIndex * 2.9 + 5.0);
       float baseR = (aBlack > 0.5) ? uBlackR : uRing;
-      float r = baseR * mix(0.85, 1.15, h1);
+      // içe doğru yoğunlaşma (merkeze yakın daha fazla) + çok çok az içe sürüklenme
+      float r = baseR * mix(0.68, 1.12, h1 * h1) * (1.0 - life * 0.05);
       float ang = h2 * 6.2831853 + uTime * 7.0 * pow(r, -1.5);    // beyaz+siyah AYNI yön
       vec3 P = vec3(cos(ang) * r, 0.0, sin(ang) * r);
       gl_Position = project(P);
@@ -234,15 +235,15 @@
     });
     scene.add(new THREE.Mesh(geo, mat));
 
-    // 120 parçacık: 80 beyaz (ring) + 40 siyah (beyaz diskin üstünde) — sürekli yaşam döngüsü
-    const N = 120;
+    // 180 parçacık: 120 beyaz (ring) + 60 siyah (beyaz diskin üstünde) — sürekli yaşam döngüsü
+    const N = 180;
     const pg = new THREE.BufferGeometry();
     const aSeed = new Float32Array(N), aIndex = new Float32Array(N), aBlack = new Float32Array(N);
     const dum = new Float32Array(N * 3);
     for (let i = 0; i < N; i++) {
       aSeed[i] = Math.random();            // yaşam fazı offseti (asenkron)
       aIndex[i] = i + 1;
-      aBlack[i] = i >= N - 40 ? 1 : 0;     // son 40 siyah
+      aBlack[i] = i >= N - 60 ? 1 : 0;     // son 60 siyah
     }
     pg.setAttribute("position", new THREE.BufferAttribute(dum, 3));
     pg.setAttribute("aSeed", new THREE.BufferAttribute(aSeed, 1));
@@ -252,7 +253,7 @@
       uniforms: {
         uTime: { value: 0 }, uActive: { value: 0 }, uAspect: { value: 1 }, uLife: { value: 3.5 },
         uYaw: { value: 0 }, uPitch: { value: 0.25 }, uRoll: { value: 0 },
-        uRing: { value: 7.5 }, uBlackR: { value: 3.8 },
+        uRing: { value: 6.9 }, uBlackR: { value: 4.6 },
       },
       vertexShader: PART_VERT, fragmentShader: PART_FRAG,
       transparent: true, depthTest: false, depthWrite: false, blending: THREE.NormalBlending,
