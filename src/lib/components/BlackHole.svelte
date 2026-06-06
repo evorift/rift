@@ -18,7 +18,7 @@
   // CANLI AYAR sliderları (değeri okuyup bana söyle)
   let rollDeg = $state(-15);  // ekran-dik eksen eğimi (derece)
   let ringR = $state(7.5);    // beyaz parçacık ring yarıçapı
-  let blackR = $state(3.5);   // siyah parçacık yarıçapı (beyaz diskin üstünde)
+  let blackR = $state(3.8);   // siyah parçacık yarıçapı (beyaz diskin üstünde)
 
   const SCALE = 0.9;
 
@@ -142,7 +142,7 @@
     void main(){
       float r = (aBlack > 0.5) ? uBlackR * mix(0.8, 1.2, aRad)   // siyah: diskin beyazı üstünde
                                : uRing  * mix(0.82, 1.0, aRad);  // beyaz: ring üzerinde
-      float ang = aBase - uTime * 0.4;                            // ters yön (ring ile aynı)
+      float ang = aBase + uTime * 7.0 * pow(r, -1.5);             // yön çevrildi + içe yakın daha hızlı (Kepler)
       vec3 P = vec3(cos(ang) * r, 0.0, sin(ang) * r);
       gl_Position = project(P);
       float app = smoothstep(aSeed, aSeed + 0.10, uPcount);       // teker teker beliriş/yok
@@ -181,8 +181,8 @@
 
     // sağ-sol normal (yaw), yukarı-aşağı dikey döndürme (pitch, geniş aralık)
     yaw   += ((mx * 0.9 + drift) - yaw) * 0.05;
-    pitch += ((0.25 + my * 0.5) - pitch) * 0.05;
-    pitch = Math.max(0.0, Math.min(0.95, pitch));
+    pitch += ((0.20 + my * 0.41) - pitch) * 0.05;   // dikey hareket ~5° azaltıldı, hafif yan
+    pitch = Math.max(0.0, Math.min(0.88, pitch));
 
     // pcount yavaş ilerler -> parçacıklar teker teker
     pcount += (pcountTarget - pcount) * 0.04;
