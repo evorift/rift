@@ -128,7 +128,7 @@
       vec3 Pc = rotX(-uPitch) * rotY(-uYaw) * P;
       vec2 uv = 2.0 * Pc.xy / (CAMD - Pc.z);
       float cr = cos(uRoll), sr = sin(uRoll);
-      uv = mat2(cr, -sr, sr, cr) * uv;
+      uv = mat2(cr, sr, -sr, cr) * uv;                 // roll ofseti çevrildi -> kara delikle hizalı
       uv.x /= uAspect;
       return vec4(uv, 0.0, 1.0);
     }`;
@@ -147,8 +147,7 @@
       float h2 = hash(cyc * 1.31 + aIndex * 2.9 + 5.0);
       float baseR = (aBlack > 0.5) ? uBlackR : uRing;
       float r = baseR * mix(0.85, 1.15, h1);
-      float dir = (aBlack > 0.5) ? -1.0 : 1.0;                    // siyahlar TERS yönde döner
-      float ang = h2 * 6.2831853 + dir * uTime * 7.0 * pow(r, -1.5);  // içe yakın daha hızlı
+      float ang = h2 * 6.2831853 + uTime * 7.0 * pow(r, -1.5);    // beyaz+siyah AYNI yön
       vec3 P = vec3(cos(ang) * r, 0.0, sin(ang) * r);
       gl_Position = project(P);
       float grow = sin(life * 3.14159265);               // küçükten büyüyüp -> küçülerek yok
