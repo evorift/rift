@@ -1,40 +1,9 @@
 <script lang="ts">
   import NavRail from "$lib/components/NavRail.svelte";
-  import RiftPortal3D from "$lib/components/RiftPortal3D.svelte";
-  import { invoke } from "@tauri-apps/api/core";
-  import { onMount } from "svelte";
+  import { app } from "$lib/state.svelte";
 
   let active = $state("dashboard");
-  type Status = "off" | "connecting" | "on";
-  let status = $state<Status>("off");
-
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-  type EngineStatus = { running: boolean; strategy: string };
-
-  onMount(async () => {
-    try {
-      const s = await invoke<EngineStatus>("protection_status");
-      status = s.running ? "on" : "off";
-    } catch (_) {}
-  });
-
-  async function toggleBoost() {
-    if (status === "connecting") return;
-    if (status === "on") {
-      try { await invoke("stop_protection"); } catch (_) {}
-      status = "off";
-      return;
-    }
-    status = "connecting";
-    try {
-      // backend + minimum animasyon süresi birlikte
-      await Promise.all([invoke("start_protection"), sleep(800)]);
-      status = "on";
-    } catch (_) {
-      status = "off"; // TODO: hata toast'u
-    }
-  }
+  const status = $derived(app.status);
 
   const statusLabel = $derived(
     status === "on" ? "Korumalı" : status === "connecting" ? "Bağlanıyor…" : "Kapalı"
@@ -67,12 +36,13 @@
     </header>
 
     <section class="hero">
-      <div class="rift-stage"><RiftPortal3D {status} onToggle={toggleBoost} /></div>
+      <button class="power {status}" onclick={() => app.toggle()} aria-label="Korumayı aç/kapat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M12 3v9" /><path d="M6.4 7a8 8 0 1 0 11.2 0" />
+        </svg>
+      </button>
       <h2 class="hero-title">{heroTitle}</h2>
       <p class="hero-sub">{heroSub}</p>
-      {#if status === "on"}
-        <button class="stop" onclick={toggleBoost}>Rift'i kapat</button>
-      {/if}
     </section>
 
     <section class="stats">
@@ -95,24 +65,33 @@
   .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
   .head h1 { font-size: 22px; font-weight: 700; }
 
+  .chip { backdrop-filter: blur(6px); }
   .chip .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
   .status-off { color: var(--text-muted); }
   .status-connecting { color: var(--amber); }
   .status-on { color: var(--green); }
 
-  /* HERO — ortalı */
-  .hero { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
-  .rift-stage { width: 100%; max-width: 580px; height: 360px; }
-  .hero-title { font-size: 28px; font-weight: 800; letter-spacing: .3px; margin-top: 14px; }
-  .hero-sub { color: var(--text-muted); max-width: 460px; text-align: center; line-height: 1.5; }
-  .stop {
-    margin-top: 14px; padding: 8px 18px; border-radius: 999px; cursor: pointer;
-    background: transparent; border: 1px solid var(--border); color: var(--text-muted);
-    font-weight: 600; transition: background .15s, color .15s, border-color .15s;
+  /* HERO — arka planda rift, ortada güç butonu */
+  .hero { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; }
+  .power {
+    width: 92px; height: 92px; border-radius: 50%; cursor: pointer;
+    border: 2px solid rgba(190,210,255,.25);
+    background: rgba(8,12,20,.35); color: var(--text-muted);
+    backdrop-filter: blur(4px);
+    display: grid; place-items: center; margin-bottom: 16px;
+    transition: color .25s, border-color .25s, box-shadow .35s, transform .1s;
   }
-  .stop:hover { background: var(--bg-hover); color: var(--text); border-color: #2a3346; }
+  .power svg { width: 38px; height: 38px; }
+  .power:hover { color: #fff; border-color: rgba(190,210,255,.5); }
+  .power:active { transform: scale(.96); }
+  .power.connecting { color: var(--amber); border-color: var(--amber); }
+  .power.on {
+    color: var(--accent); border-color: var(--accent);
+    box-shadow: 0 0 30px -4px var(--accent-glow);
+  }
+  .hero-title { font-size: 28px; font-weight: 800; letter-spacing: .3px; text-shadow: 0 2px 18px rgba(0,0,0,.6); }
+  .hero-sub { color: var(--text); opacity: .85; max-width: 460px; text-align: center; line-height: 1.5; text-shadow: 0 2px 14px rgba(0,0,0,.7); }
 
-  /* stat kartları */
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 10px; }
   .stat { display: flex; flex-direction: column; gap: 8px; }
   .stat .lbl { color: var(--text-muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
