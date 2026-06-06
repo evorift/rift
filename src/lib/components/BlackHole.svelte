@@ -18,6 +18,9 @@
   let reveal = 0, revealTarget = 0;
   // parçacık geçişi (her aç/kapa'da 0->1 patlama)
   let burst = 1, burstActive = false;
+  // CANLI AYAR sliderları (değeri okuyup bana söyle)
+  let rollDeg = $state(-15);   // ekran-dik eksen eğimi (derece)
+  let ringR = $state(5.4);     // parçacık ring yarıçapı (dünya birimi)
 
   // render the heavy raymarch at reduced internal resolution, CSS upscales.
   const SCALE = 0.9;
@@ -35,6 +38,7 @@
     uniform float uPitch;
     uniform float uActive;
     uniform float uReveal;   // 0 = hidden (power-button state), 1 = full black hole
+    uniform float uRoll;     // ekran-dik eksen eğimi (radyan)
 
     const int   STEPS  = 300;      // affine-param integration steps
     const float DT     = 0.10;     // base step (adaptively scaled by radius)
@@ -43,7 +47,6 @@
     const float DOUT   = 6.0;      // disk outer radius (compact, fits zoomed frame)
     const float ESCAPE = 30.0;     // ray escaped to infinity
     const float PI     = 3.14159265;
-    const float ROLL   = 0.2618;   // 15 derece ekran-dik eksen eğimi
 
     mat3 rotX(float a){ float c=cos(a), s=sin(a); return mat3(1.,0.,0., 0.,c,-s, 0.,s,c); }
     mat3 rotY(float a){ float c=cos(a), s=sin(a); return mat3(c,0.,s, 0.,1.,0., -s,0.,c); }
@@ -58,8 +61,8 @@
     void main(){
       // aspect-correct, y-normalized screen coords centered at 0
       vec2 uv = (gl_FragCoord.xy * 2.0 - uRes) / uRes.y;
-      // 15 derece roll (ekran-dik eksen)
-      float cr = cos(ROLL), sr = sin(ROLL);
+      // roll (ekran-dik eksen, uniform)
+      float cr = cos(uRoll), sr = sin(uRoll);
       uv = mat2(cr, -sr, sr, cr) * uv;
 
       // orbit camera: rotate a fixed basis by yaw/pitch
@@ -160,28 +163,27 @@
   // --- power-button -> particles geçiş katmanı (clip-space, kameradan bağımsız) ---
   // kara delik shader'ı ile AYNI kamera (D=18, focal=2, 15° roll) -> parçacıklar 3B uzayda hizalı
   const PROJ = `
-    uniform float uYaw, uPitch, uAspect;
+    uniform float uYaw, uPitch, uAspect, uRoll;
     const float CAMD = 18.0;
-    const float ROLL2 = 0.2618;
     mat3 rotX(float a){ float c=cos(a), s=sin(a); return mat3(1.,0.,0., 0.,c,-s, 0.,s,c); }
     mat3 rotY(float a){ float c=cos(a), s=sin(a); return mat3(c,0.,s, 0.,1.,0., -s,0.,c); }
     vec4 project(vec3 P){
       vec3 Pc = rotX(-uPitch) * rotY(-uYaw) * P;      // world -> kamera çerçevesi
       vec2 uv = 2.0 * Pc.xy / (CAMD - Pc.z);
-      float cr = cos(ROLL2), sr = sin(ROLL2);
-      uv = mat2(cr, -sr, sr, cr) * uv;                 // 15° roll (kara delikle aynı)
+      float cr = cos(uRoll), sr = sin(uRoll);
+      uv = mat2(cr, -sr, sr, cr) * uv;                 // roll (kara delikle aynı)
       uv.x /= uAspect;
       return vec4(uv, 0.0, 1.0);
     }`;
   // power butonu -> ring'e DÜZ çekiliş (spiral yok), 3B
   const PVERT = PROJ + `
-    uniform float uBurst;
+    uniform float uBurst, uRing;
     attribute float aAngle, aSeed, aRing;
     varying float vA;
     void main(){
       float Rb = 4.1;                                  // power butonu (ekrana bakan halka)
       vec3 start = rotY(uYaw) * rotX(uPitch) * vec3(cos(aAngle)*Rb, sin(aAngle)*Rb, 0.0);
-      float Rr = 2.6 + aSeed * 0.3;                    // kara delik ringi (y=0 düzlemi)
+      float Rr = uRing + aSeed * 0.3;                  // kara delik ringi (y=0 düzlemi)
       vec3 endp = vec3(cos(aAngle)*Rr, 0.0, sin(aAngle)*Rr);
       float e = 1.0 - pow(1.0 - uBurst, 1.6);
       gl_Position = project(mix(start, endp, e));
@@ -190,12 +192,12 @@
     }`;
   // ring ÜZERİNDE dönen ambient parçacıklar (3B): yoktan -> 3sn dön -> küçülüp yok
   const AVERT = PROJ + `
-    uniform float uTime, uActive;
+    uniform float uTime, uActive, uRing;
     attribute float aBase, aSeed, aOuter;
     varying float vA;
     void main(){
       float life = fract(uTime / 3.0 + aSeed);
-      float Rr = mix(2.45, 2.95, aOuter);              // ring bandı üzerinde
+      float Rr = uRing * mix(0.92, 1.08, aOuter);      // ring bandı üzerinde
       float ang = aBase + uTime * 0.5;
       vec3 P = vec3(cos(ang)*Rr, 0.0, sin(ang)*Rr);
       gl_Position = project(P);
@@ -250,6 +252,10 @@
     mat.uniforms.uPitch.value = pitch;
     mat.uniforms.uActive.value = active;
     mat.uniforms.uReveal.value = reveal;
+    const rollRad = (rollDeg * Math.PI) / 180;
+    mat.uniforms.uRoll.value = rollRad;
+    pMat.uniforms.uRoll.value = rollRad; pMat.uniforms.uRing.value = ringR;
+    aMat.uniforms.uRoll.value = rollRad; aMat.uniforms.uRing.value = ringR;
 
     points.visible = burst < 1.0;
     pMat.uniforms.uBurst.value = burst;
@@ -285,6 +291,7 @@
         uPitch:  { value: 0.12 },
         uActive: { value: 0 },
         uReveal: { value: 0 },
+        uRoll:   { value: 0 },
       },
       vertexShader: VERT,
       fragmentShader: FRAG,
@@ -307,7 +314,7 @@
     pg.setAttribute("aSeed", new THREE.BufferAttribute(pSeed, 1));
     pg.setAttribute("aRing", new THREE.BufferAttribute(pRing, 1));
     pMat = new THREE.ShaderMaterial({
-      uniforms: { uBurst: { value: 1 }, uAspect: { value: 1 }, uTime: { value: 0 }, uYaw: { value: 0 }, uPitch: { value: 0.12 } },
+      uniforms: { uBurst: { value: 1 }, uAspect: { value: 1 }, uTime: { value: 0 }, uYaw: { value: 0 }, uPitch: { value: 0.12 }, uRoll: { value: 0 }, uRing: { value: 5.4 } },
       vertexShader: PVERT, fragmentShader: PFX,
       transparent: true, depthTest: false, depthWrite: false, blending: THREE.NormalBlending,
     });
@@ -324,7 +331,7 @@
     ag.setAttribute("aSeed", new THREE.BufferAttribute(aSeed, 1));
     ag.setAttribute("aOuter", new THREE.BufferAttribute(aOuter, 1));
     aMat = new THREE.ShaderMaterial({
-      uniforms: { uTime: { value: 0 }, uActive: { value: 0 }, uAspect: { value: 1 }, uYaw: { value: 0 }, uPitch: { value: 0.12 } },
+      uniforms: { uTime: { value: 0 }, uActive: { value: 0 }, uAspect: { value: 1 }, uYaw: { value: 0 }, uPitch: { value: 0.12 }, uRoll: { value: 0 }, uRing: { value: 5.4 } },
       vertexShader: AVERT, fragmentShader: PFX,
       transparent: true, depthTest: false, depthWrite: false, blending: THREE.NormalBlending,
     });
@@ -365,15 +372,30 @@
   });
 </script>
 
-<button class="bh" bind:this={host} onclick={() => app.toggle()} aria-label="Kara delik · aç/kapat">
-  <svg class="power" class:show={app.status === "off"} viewBox="0 0 100 100" aria-hidden="true">
-    <circle class="rim" cx="50" cy="50" r="46" />
-    <line class="stem" x1="50" y1="27" x2="50" y2="47" />
-    <path class="arc" d="M34 37 A20 20 0 1 0 66 37" />
-  </svg>
-</button>
+<div class="bh-wrap">
+  <button class="bh" bind:this={host} onclick={() => app.toggle()} aria-label="Kara delik · aç/kapat">
+    <svg class="power" class:show={app.status === "off"} viewBox="0 0 100 100" aria-hidden="true">
+      <circle class="rim" cx="50" cy="50" r="46" />
+      <line class="stem" x1="50" y1="27" x2="50" y2="47" />
+      <path class="arc" d="M34 37 A20 20 0 1 0 66 37" />
+    </svg>
+  </button>
+  <div class="dbg">
+    <label>Roll <b>{rollDeg}°</b><input type="range" min="-45" max="45" step="1" bind:value={rollDeg} /></label>
+    <label>Ring <b>{ringR.toFixed(1)}</b><input type="range" min="1" max="14" step="0.1" bind:value={ringR} /></label>
+  </div>
+</div>
 
 <style>
+  .bh-wrap { position: relative; width: 100%; height: 100%; }
+  .dbg {
+    position: absolute; top: 6px; left: 6px; z-index: 5; pointer-events: auto;
+    display: flex; flex-direction: column; gap: 4px;
+    background: rgba(0,0,0,.5); padding: 6px 8px; border-radius: 8px;
+  }
+  .dbg label { display: flex; align-items: center; gap: 6px; font-size: 10px; color: #cfd6e4; white-space: nowrap; }
+  .dbg b { color: #fff; min-width: 36px; display: inline-block; }
+  .dbg input { width: 92px; }
   .bh { position: relative; width: 100%; height: 100%; border: none; background: transparent; cursor: pointer; padding: 0; display: block; }
   :global(.bh canvas) { position: absolute; inset: 0; z-index: 1; display: block; width: 100% !important; height: 100% !important; }
   .power {
