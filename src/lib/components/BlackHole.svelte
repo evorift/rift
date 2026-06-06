@@ -14,15 +14,14 @@
   let yaw = 0, pitch = 0.25;
   let active = 0, activeTarget = 0;
 
-  // CANLI AYAR sliderları (değeri okuyup bana söyle)
-  let rollDeg = $state(-15);  // ekran-dik eksen eğimi (derece)
-  let ringR = $state(8.3);    // beyaz parçacık ring yarıçapı
-  let blackR = $state(5.0);   // siyah parçacık yarıçapı (beyaz diskin üstünde)
-  // dönme limitleri (derece) — sen maks açıları göster
-  let yawDeg = $state(55);        // sağ/sol maks (±)
-  let pitchBaseDeg = $state(12);  // dinlenme eğimi
-  let pitchUpDeg = $state(34);    // yukarı maks (ek)
-  let pitchDnDeg = $state(10);    // aşağı maks (ek)
+  // sabitlenmiş ayarlar
+  const rollDeg = -15;        // ekran-dik eksen eğimi
+  const ringR = 8.9;          // beyaz parçacık ring yarıçapı
+  const blackR = 5.7;         // siyah parçacık yarıçapı
+  const yawDeg = 47;          // sağ/sol maks (±)
+  const pitchBaseDeg = 15;    // dinlenme eğimi
+  const pitchUpDeg = 13;      // yukarı maks (ek)
+  const pitchDnDeg = 4;       // aşağı maks (ek)
 
   const SCALE = 0.9;
 
@@ -151,9 +150,11 @@
       float h1 = hash(cyc + aIndex * 1.7);
       float h2 = hash(cyc * 1.31 + aIndex * 2.9 + 5.0);
       float baseR = (aBlack > 0.5) ? uBlackR : uRing;
-      // içe doğru yoğunlaşma (merkeze yakın daha fazla) + çok çok az içe sürüklenme
-      float r = baseR * mix(0.68, 1.12, h1 * h1) * (1.0 - life * 0.05);
-      float ang = h2 * 6.2831853 + uTime * 3.5 * pow(r, -1.5);    // dönme hızı yarıya
+      float r0 = baseR * mix(0.68, 1.12, h1 * h1);                // hız için SABİT yarıçap (içe yoğun)
+      float r  = r0 * (1.0 - life * 0.05);                        // çizim: çok az içe sürüklenme
+      // hız sabit (zamanla hızlanmaz) + üst sınır
+      float spd = min(7.0 * pow(r0, -1.5), 0.8);
+      float ang = h2 * 6.2831853 + uTime * spd;
       vec3 P = vec3(cos(ang) * r, 0.0, sin(ang) * r);
       gl_Position = project(P);
       // kara deliğin gölgesinin ARKASINA geçince gizle (occlusion)
@@ -264,7 +265,7 @@
       uniforms: {
         uTime: { value: 0 }, uActive: { value: 0 }, uAspect: { value: 1 }, uLife: { value: 3.5 },
         uYaw: { value: 0 }, uPitch: { value: 0.25 }, uRoll: { value: 0 },
-        uRing: { value: 8.3 }, uBlackR: { value: 5.0 },
+        uRing: { value: 8.9 }, uBlackR: { value: 5.7 },
       },
       vertexShader: PART_VERT, fragmentShader: PART_FRAG,
       transparent: true, depthTest: false, depthWrite: false, blending: THREE.NormalBlending,
@@ -304,27 +305,10 @@
       <path class="arc" d="M34 37 A20 20 0 1 0 66 37" />
     </svg>
   </button>
-  <div class="dbg">
-    <label>Roll <b>{rollDeg}°</b><input type="range" min="-45" max="45" step="1" bind:value={rollDeg} /></label>
-    <label>Ring <b>{ringR.toFixed(1)}</b><input type="range" min="1" max="16" step="0.1" bind:value={ringR} /></label>
-    <label>Black <b>{blackR.toFixed(1)}</b><input type="range" min="1" max="12" step="0.1" bind:value={blackR} /></label>
-    <label>Yaw± <b>{yawDeg}°</b><input type="range" min="0" max="120" step="1" bind:value={yawDeg} /></label>
-    <label>P.base <b>{pitchBaseDeg}°</b><input type="range" min="0" max="60" step="1" bind:value={pitchBaseDeg} /></label>
-    <label>P.up <b>{pitchUpDeg}°</b><input type="range" min="0" max="80" step="1" bind:value={pitchUpDeg} /></label>
-    <label>P.dn <b>{pitchDnDeg}°</b><input type="range" min="0" max="60" step="1" bind:value={pitchDnDeg} /></label>
-  </div>
 </div>
 
 <style>
   .bh-wrap { position: relative; width: 100%; height: 100%; }
-  .dbg {
-    position: absolute; top: 6px; left: 6px; z-index: 5; pointer-events: auto;
-    display: flex; flex-direction: column; gap: 4px;
-    background: rgba(0,0,0,.5); padding: 6px 8px; border-radius: 8px;
-  }
-  .dbg label { display: flex; align-items: center; gap: 6px; font-size: 10px; color: #cfd6e4; white-space: nowrap; }
-  .dbg b { color: #fff; min-width: 36px; display: inline-block; }
-  .dbg input { width: 92px; }
   .bh { position: relative; width: 100%; height: 100%; border: none; background: transparent; cursor: pointer; padding: 0; display: block; }
   :global(.bh canvas) { position: absolute; inset: 0; z-index: 1; display: block; width: 100% !important; height: 100% !important; }
   .power {
