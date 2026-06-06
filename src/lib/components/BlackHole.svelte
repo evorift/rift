@@ -8,6 +8,7 @@
   let renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.OrthographicCamera;
   let mat: THREE.ShaderMaterial;
   let pMat: THREE.ShaderMaterial, points: THREE.Points;
+  let aMat: THREE.ShaderMaterial, aPoints: THREE.Points;
   const clock = new THREE.Clock();
 
   // mouse-driven orbit targets + lerped state
@@ -162,23 +163,47 @@
     attribute float aAngle, aSeed, aRing;
     varying float vA;
     void main(){
-      float Rr = 0.46;
-      vec2 home, dir;
-      if (aRing > 0.5){
-        home = vec2(cos(aAngle), sin(aAngle)) * Rr;   // ince halka
-        dir  = vec2(cos(aAngle), sin(aAngle));
-      } else {
-        home = vec2(0.0, mix(0.40, 0.08, aSeed));      // güç ikonu dikey çizgisi
-        dir  = normalize(vec2((aSeed - 0.5) * 0.5, 0.9));
-      }
-      float e = 1.0 - pow(1.0 - uBurst, 2.0);          // ease-out patlama
-      vec2 pos = home + dir * e * (0.45 + aSeed * 0.5);
+      float Rr = (aRing > 0.5) ? 0.46 : mix(0.40, 0.08, aSeed);     // halka / güç ikonu çizgisi
+      float a0 = (aRing > 0.5) ? aAngle : (1.5708 + (aSeed - 0.5) * 0.6);
+      float e = 1.0 - pow(1.0 - uBurst, 1.6);
+      // patlama YOK: çevredeki ışığa doğru içe çekil + hafif spiral, yavaşça sön
+      float r   = mix(Rr, 0.16, e);
+      float ang = a0 + e * 2.2;
+      vec2 pos = vec2(cos(ang), sin(ang)) * r;
       pos.x /= uAspect;
       gl_Position = vec4(pos, 0.0, 1.0);
-      gl_PointSize = mix(3.5, 1.0, uBurst) * 2.0;
-      vA = 1.0 - uBurst;
+      gl_PointSize = mix(2.6, 0.5, e) * 2.0;          // küçülerek
+      vA = (1.0 - uBurst) * 0.9;                       // yavaşça sön
     }`;
   const PFRAG = `
+    precision mediump float;
+    varying float vA;
+    void main(){
+      float d = distance(gl_PointCoord, vec2(0.5));
+      float a = smoothstep(0.5, 0.0, d) * vA;
+      if (a < 0.01) discard;
+      gl_FragColor = vec4(vec3(1.0), a);
+    }`;
+
+  // --- ring çevresinde dönen ambient parçacıklar (yoktan oluş -> 3sn dön -> küçül -> yok) ---
+  const AVERT = `
+    uniform float uTime, uActive, uAspect;
+    attribute float aBase, aSeed, aOuter;
+    varying float vA;
+    void main(){
+      float life = fract(uTime / 3.0 + aSeed);            // 3 saniyelik döngü
+      float r   = mix(0.30, 0.40, aOuter);                // ring üstü / ring dışı
+      float ang = aBase + uTime * 0.45;                   // yavaş dönüş
+      vec2 pos = vec2(cos(ang), sin(ang)) * r;
+      pos.x /= uAspect;
+      float cr = cos(0.2618), sr = sin(0.2618);
+      pos = mat2(cr, -sr, sr, cr) * pos;                  // 15 derece roll (kara delikle hizalı)
+      gl_Position = vec4(pos, 0.0, 1.0);
+      float fade = sin(life * 3.14159265);                // yoktan belir -> sön
+      gl_PointSize = (0.6 + 2.4 * fade) * 1.7;            // büyüyüp küçülür
+      vA = fade * uActive;
+    }`;
+  const AFRAG = `
     precision mediump float;
     varying float vA;
     void main(){
@@ -203,6 +228,7 @@
     renderer.domElement.style.height = h + "px";
     mat.uniforms.uRes.value.set(w * SCALE, h * SCALE);
     if (pMat) pMat.uniforms.uAspect.value = w / h;
+    if (aMat) aMat.uniforms.uAspect.value = w / h;
   }
 
   function animate() {
@@ -211,13 +237,13 @@
 
     // lerp orbit toward mouse target, plus a slow auto drift so it's never dead
     const drift = Math.sin(t * 0.12) * 0.35;
+    // sağ-sol normal, yukarı-aşağı yarı miktar
     yaw   += ((mx * 0.9 + drift) - yaw) * 0.05;
-    pitch += ((0.12 + my * 0.28) - pitch) * 0.05;
-    // near edge-on (Interstellar look); small range so the disk stays a thin lensed band
-    pitch = Math.max(0.02, Math.min(0.5, pitch));
+    pitch += ((0.12 + my * 0.14) - pitch) * 0.05;
+    pitch = Math.max(0.04, Math.min(0.42, pitch));
     active += (activeTarget - active) * 0.05;
     reveal += (revealTarget - reveal) * 0.06;
-    if (burstActive) { burst += 0.02; if (burst >= 1) { burst = 1; burstActive = false; } }
+    if (burstActive) { burst += 0.012; if (burst >= 1) { burst = 1; burstActive = false; } } // yavaş
 
     mat.uniforms.uTime.value = t;
     mat.uniforms.uYaw.value = yaw;
@@ -228,6 +254,10 @@
     points.visible = burst < 1.0;
     pMat.uniforms.uBurst.value = burst;
     pMat.uniforms.uTime.value = t;
+
+    aPoints.visible = reveal > 0.05;
+    aMat.uniforms.uTime.value = t;
+    aMat.uniforms.uActive.value = active;
 
     renderer.render(scene, camera);
   }
@@ -278,6 +308,23 @@
       transparent: true, depthTest: false, depthWrite: false, blending: THREE.NormalBlending,
     });
     points = new THREE.Points(pg, pMat); points.visible = false; points.renderOrder = 2; scene.add(points);
+
+    // ring çevresinde dönen ambient parçacıklar (ring üstü 10 + ring dışı 10)
+    const NA = 20;
+    const ag = new THREE.BufferGeometry();
+    const aBase = new Float32Array(NA), aSeed = new Float32Array(NA), aOuter = new Float32Array(NA);
+    const adum = new Float32Array(NA * 3);
+    for (let i = 0; i < NA; i++) { aBase[i] = Math.random() * Math.PI * 2; aSeed[i] = Math.random(); aOuter[i] = i < NA / 2 ? 0 : 1; }
+    ag.setAttribute("position", new THREE.BufferAttribute(adum, 3));
+    ag.setAttribute("aBase", new THREE.BufferAttribute(aBase, 1));
+    ag.setAttribute("aSeed", new THREE.BufferAttribute(aSeed, 1));
+    ag.setAttribute("aOuter", new THREE.BufferAttribute(aOuter, 1));
+    aMat = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 }, uActive: { value: 0 }, uAspect: { value: 1 } },
+      vertexShader: AVERT, fragmentShader: AFRAG,
+      transparent: true, depthTest: false, depthWrite: false, blending: THREE.NormalBlending,
+    });
+    aPoints = new THREE.Points(ag, aMat); aPoints.renderOrder = 3; scene.add(aPoints);
 
     // seed initial state consistently with the $effect (treat 'connecting' as on)
     activeTarget = (app.status === "on" || app.status === "connecting") ? 1 : 0;
