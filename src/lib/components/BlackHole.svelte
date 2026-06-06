@@ -147,7 +147,8 @@
       float h2 = hash(cyc * 1.31 + aIndex * 2.9 + 5.0);
       float baseR = (aBlack > 0.5) ? uBlackR : uRing;
       float r = baseR * mix(0.85, 1.15, h1);
-      float ang = h2 * 6.2831853 + uTime * 7.0 * pow(r, -1.5);   // dönüş (içe yakın daha hızlı)
+      float dir = (aBlack > 0.5) ? -1.0 : 1.0;                    // siyahlar TERS yönde döner
+      float ang = h2 * 6.2831853 + dir * uTime * 7.0 * pow(r, -1.5);  // içe yakın daha hızlı
       vec3 P = vec3(cos(ang) * r, 0.0, sin(ang) * r);
       gl_Position = project(P);
       float grow = sin(life * 3.14159265);               // küçükten büyüyüp -> küçülerek yok
@@ -234,15 +235,15 @@
     });
     scene.add(new THREE.Mesh(geo, mat));
 
-    // 60 parçacık: 40 beyaz (ring) + 20 siyah (beyaz diskin üstünde) — sürekli yaşam döngüsü
-    const N = 60;
+    // 120 parçacık: 80 beyaz (ring) + 40 siyah (beyaz diskin üstünde) — sürekli yaşam döngüsü
+    const N = 120;
     const pg = new THREE.BufferGeometry();
     const aSeed = new Float32Array(N), aIndex = new Float32Array(N), aBlack = new Float32Array(N);
     const dum = new Float32Array(N * 3);
     for (let i = 0; i < N; i++) {
       aSeed[i] = Math.random();            // yaşam fazı offseti (asenkron)
       aIndex[i] = i + 1;
-      aBlack[i] = i >= N - 20 ? 1 : 0;     // son 20 siyah
+      aBlack[i] = i >= N - 40 ? 1 : 0;     // son 40 siyah
     }
     pg.setAttribute("position", new THREE.BufferAttribute(dum, 3));
     pg.setAttribute("aSeed", new THREE.BufferAttribute(aSeed, 1));
