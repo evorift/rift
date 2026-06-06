@@ -1,30 +1,25 @@
 <script lang="ts">
   import NavRail from "$lib/components/NavRail.svelte";
   import BlackHole from "$lib/components/BlackHole.svelte";
+  import Connection from "$lib/components/sections/Connection.svelte";
+  import Performance from "$lib/components/sections/Performance.svelte";
+  import Apps from "$lib/components/sections/Apps.svelte";
+  import Logs from "$lib/components/sections/Logs.svelte";
+  import Settings from "$lib/components/sections/Settings.svelte";
+  import Advanced from "$lib/components/sections/Advanced.svelte";
   import { app } from "$lib/state.svelte";
+  import { t } from "$lib/i18n.svelte";
 
   let active = $state("dashboard");
   const status = $derived(app.status);
 
   const statusLabel = $derived(
-    status === "on" ? "Korumalı" : status === "connecting" ? "Bağlanıyor…" : "Kapalı"
+    status === "on" ? t("status.on") : status === "connecting" ? t("status.connecting") : t("status.off")
   );
   const heroTitle = $derived(
-    status === "on" ? "Korumalı · Gizlisin" : status === "connecting" ? "Bağlanıyor…" : "Korumasız"
+    status === "on" ? t("dash.heroOn") : status === "connecting" ? t("dash.heroConnecting") : t("dash.heroOff")
   );
-  const heroSub = $derived(
-    status === "on"
-      ? "Engeller aşıldı, izin gizlendi — yalnızca seçili siteler etkileniyor, gerisi normal."
-      : "Kara deliği aç: tek tıkla engelleri aş. VPN yok, hız düşmez."
-  );
-
-  const sections: Record<string, string> = {
-    connection: "Bağlantı & Stratejiler",
-    performance: "Performans",
-    apps: "Uygulamalar",
-    logs: "Günlük",
-    settings: "Ayarlar",
-  };
+  const heroSub = $derived(status === "on" ? t("dash.subOn") : t("dash.subOff"));
 </script>
 
 <NavRail {active} onSelect={(k) => (active = k)} />
@@ -32,7 +27,7 @@
 <main class="content">
   {#if active === "dashboard"}
     <header class="head">
-      <h1>Panel</h1>
+      <h1>{t("dash.title")}</h1>
       <span class="chip status-{status}"><i class="dot"></i> {statusLabel}</span>
     </header>
 
@@ -43,17 +38,23 @@
     </section>
 
     <section class="stats">
-      <div class="card stat"><span class="lbl">Ping</span><span class="val mono">{status === "on" ? "24" : "—"}<small>ms</small></span></div>
-      <div class="card stat"><span class="lbl">İndirme</span><span class="val mono">{status === "on" ? "0.0" : "—"}<small>Mbps</small></span></div>
-      <div class="card stat"><span class="lbl">Yükleme</span><span class="val mono">{status === "on" ? "0.0" : "—"}<small>Mbps</small></span></div>
-      <div class="card stat"><span class="lbl">Strateji</span><span class="val small">{status === "on" ? "Otomatik" : "—"}</span></div>
+      <div class="card stat"><span class="lbl">{t("dash.ping")}</span><span class="val mono">{status === "on" ? app.ping : "—"}<small>ms</small></span></div>
+      <div class="card stat"><span class="lbl">{t("dash.download")}</span><span class="val mono">{status === "on" ? app.down.toFixed(1) : "—"}<small>Mbps</small></span></div>
+      <div class="card stat"><span class="lbl">{t("dash.upload")}</span><span class="val mono">{status === "on" ? app.up.toFixed(1) : "—"}<small>Mbps</small></span></div>
+      <div class="card stat"><span class="lbl">{t("dash.strategy")}</span><span class="val small">{status === "on" ? t("dash.auto") : "—"}</span></div>
     </section>
-  {:else}
-    <header class="head"><h1>{sections[active]}</h1></header>
-    <div class="card placeholder">
-      <p>Bu bölüm yapım aşamasında.</p>
-      <span class="muted">Yakında: {sections[active]} özellikleri.</span>
-    </div>
+  {:else if active === "connection"}
+    <Connection />
+  {:else if active === "performance"}
+    <Performance />
+  {:else if active === "apps"}
+    <Apps />
+  {:else if active === "logs"}
+    <Logs />
+  {:else if active === "settings"}
+    <Settings onNavigate={(k) => (active = k)} />
+  {:else if active === "advanced"}
+    <Advanced onBack={() => (active = "settings")} />
   {/if}
 </main>
 
@@ -70,7 +71,7 @@
 
   /* HERO — kara delik butonu */
   .hero { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; }
-  .bh-stage { width: 360px; height: 360px; margin-bottom: 10px; }
+  .bh-stage { width: 320px; height: 320px; margin-bottom: 10px; }
   .hero-title { font-size: 26px; font-weight: 800; letter-spacing: .3px; }
   .hero-sub { color: var(--text-muted); max-width: 460px; text-align: center; line-height: 1.5; }
 
@@ -80,7 +81,4 @@
   .stat .val { font-size: 28px; font-weight: 700; }
   .stat .val small { font-size: 13px; font-weight: 600; color: var(--text-muted); margin-left: 5px; }
   .stat .val.small { font-size: 18px; }
-
-  .placeholder { display: flex; flex-direction: column; gap: 6px; }
-  .placeholder .muted { color: var(--text-muted); font-size: 13px; }
 </style>

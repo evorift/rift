@@ -116,7 +116,10 @@
       a = clamp(a, 0.0, 1.0);
       col = clamp(col, 0.0, 1.0);
 
-      float ring = smoothstep(0.16, 0.0, abs(minR - 1.5)) * (1.0 - hitHorizon);
+      float rdr = abs(minR - 1.5);
+      float ringCore = smoothstep(0.16, 0.0, rdr);
+      float ringGlow = smoothstep(0.55, 0.0, rdr) * 0.22;          // hafif bloom (yumuşak hale)
+      float ring = (ringCore + ringGlow) * (1.0 - hitHorizon);
       vec3  outRGB = col * a + vec3(ring);
       float outA   = clamp(max(a, ring), 0.0, 1.0);
       gl_FragColor = vec4(outRGB, outA) * uReveal;
@@ -157,10 +160,11 @@
       float ang = h2 * 6.2831853 + uTime * spd;
       vec3 P = vec3(cos(ang) * r, 0.0, sin(ang) * r);
       gl_Position = project(P);
-      // kara deliğin gölgesinin ARKASINA geçince gizle (occlusion)
-      vec3 Pc = rotX(-uPitch) * rotY(-uYaw) * P;
-      float screenR = length(2.0 * Pc.xy / (CAMD - Pc.z));
-      float occ = smoothstep(0.6, 0.0, Pc.z) * smoothstep(0.34, 0.26, screenR);
+      // kara deliğin ARKASINA geçince gizle (dünya-uzayı impact parametresi)
+      vec3 ax = rotY(uYaw) * rotX(uPitch) * vec3(0.0, 0.0, 1.0);  // kamera ekseni (origin->kamera)
+      float tproj = dot(P, ax);                                    // >0 ön, <0 arka
+      float perp  = length(P - tproj * ax);                        // eksene dik mesafe
+      float occ = smoothstep(0.5, -0.5, tproj) * smoothstep(3.1, 2.4, perp); // arka + gölge içinde -> gizle
       float grow = sin(life * 3.14159265);               // küçükten büyüyüp -> küçülerek yok
       gl_PointSize = (0.4 + 3.6 * grow) * 1.7;
       vA = grow * smoothstep(0.0, 0.2, uActive) * (1.0 - occ);
@@ -171,7 +175,9 @@
     varying float vA, vBlack;
     void main(){
       float d = distance(gl_PointCoord, vec2(0.5));
-      float a = smoothstep(0.5, 0.0, d) * vA;
+      float core = smoothstep(0.42, 0.0, d);
+      float halo = smoothstep(0.5, 0.0, d) * 0.35;                // hafif hale (bloom hissi)
+      float a = (core + halo) * vA;
       if (a < 0.01) discard;
       vec3 col = mix(vec3(1.0), vec3(0.0), vBlack);               // beyaz / siyah
       gl_FragColor = vec4(col, a);
