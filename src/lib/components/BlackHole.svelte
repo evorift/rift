@@ -56,8 +56,8 @@
 
       // orbit camera: rotate a fixed basis by yaw/pitch
       mat3 R = rotY(uYaw) * rotX(uPitch);
-      vec3 ro = R * vec3(0.0, 0.0, 9.0);            // camera position (distance ~9)
-      vec3 rd = R * normalize(vec3(uv, -2.9));      // ray dir (focal length)
+      vec3 ro = R * vec3(0.0, 0.0, 18.0);           // camera pulled back -> smaller model in frame
+      vec3 rd = R * normalize(vec3(uv, -2.0));      // wider FOV -> more empty space around the hole
 
       // geodesic integration variables
       vec3  pos = ro;
