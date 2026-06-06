@@ -5,124 +5,258 @@
 
   let host: HTMLButtonElement;
   let raf = 0;
-  let renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera;
-  let pMat: THREE.ShaderMaterial, ring: THREE.Mesh;
+  let renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.OrthographicCamera;
+  let mat: THREE.ShaderMaterial;
   const clock = new THREE.Clock();
-  let mx = 0, my = 0, yaw = 0, pitch = 0.5, active = 0, activeTarget = 0;
 
-  const RIN = 1.35, ROUT = 4.2, RS = 1.12, COUNT = 7000;
+  // mouse-driven orbit targets + lerped state
+  let mx = 0, my = 0;
+  let yaw = 0, pitch = 0.42;
+  let active = 0, activeTarget = 0;
 
-  const PVERT = `
-    uniform float uTime,uState,uPitch,uYaw;
-    attribute float aRadius,aAngle,aSpeed,aSeed;
-    varying float vA;
+  // render the heavy raymarch at reduced internal resolution, CSS upscales.
+  // NOTE: resolution is driven ONLY through this SCALE (setPixelRatio(1) below),
+  // so there is no double-scaling with devicePixelRatio.
+  const SCALE = 0.72;
+
+  const VERT = `
+    void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+
+  // ---- Schwarzschild-approx geodesic raymarcher (units: r_s = 1) ----
+  // STEPS must be a const int (GLSL ES 1.00 requires constant loop bounds).
+  const FRAG = `
+    precision highp float;
+    uniform vec2  uRes;
+    uniform float uTime;
+    uniform float uYaw;
+    uniform float uPitch;
+    uniform float uActive;
+
+    const int   STEPS  = 300;      // affine-param integration steps
+    const float DT     = 0.10;     // base step (adaptively scaled by radius)
+    const float RS     = 1.0;      // event horizon radius (pure black)
+    const float DIN    = 2.2;      // disk inner radius (hugs the lensed shadow)
+    const float DOUT   = 7.0;      // disk outer radius
+    const float ESCAPE = 30.0;     // ray escaped to infinity
+    const float PI     = 3.14159265;
+
+    mat3 rotX(float a){ float c=cos(a), s=sin(a); return mat3(1.,0.,0., 0.,c,-s, 0.,s,c); }
+    mat3 rotY(float a){ float c=cos(a), s=sin(a); return mat3(c,0.,s, 0.,1.,0., -s,0.,c); }
+
+    // tight single-piece radial mask for the white disk (crisp inner + outer rims)
+    float diskMask(float r){
+      float inner = smoothstep(DIN, DIN + 0.18, r);   // crisp inner rim (gets lensed up)
+      float outer = smoothstep(DOUT, DOUT - 0.35, r); // crisp outer rim, minimal feather
+      return inner * outer;
+    }
+
     void main(){
-      float baseR=mix(${RIN.toFixed(2)},${ROUT.toFixed(2)},aRadius);
-      float fall=fract(uTime*0.05*aSpeed + aSeed);     // sürekli içe düşüş
-      float r=mix(baseR, ${RIN.toFixed(2)}, fall*uState);
-      r += (1.0-uState)*(2.5+aSeed*3.0);               // kapalı: dışa dağıl
-      float omega=aSpeed*pow(max(0.4,r),-1.3);
-      float ang=aAngle + uTime*omega*1.4;
-      vec3 p=vec3(cos(ang)*r, sin(ang)*r, 0.0);
-      p.z += sin(ang*2.0+aSeed*6.28)*0.05*r;           // disk kalınlığı
-      float cx=cos(uPitch),sx=sin(uPitch),cy=cos(uYaw),sy=sin(uYaw);
-      vec3 q=vec3(p.x, p.y*cx-p.z*sx, p.y*sx+p.z*cx);
-      q=vec3(q.x*cy+q.z*sy, q.y, -q.x*sy+q.z*cy);
-      vec4 mv=modelViewMatrix*vec4(q,1.0);
-      gl_PointSize=(1.3+2.2*uState)*(300.0/-mv.z);
-      gl_Position=projectionMatrix*mv;
-      float fin=smoothstep(${RIN.toFixed(2)}*0.85, ${RIN.toFixed(2)}*1.35, r); // ufukta yutul
-      float fout=smoothstep(${ROUT.toFixed(2)}+2.5, ${ROUT.toFixed(2)}-0.3, r); // dışta sön (kutu yok)
-      vA=fin*fout*clamp(uState*1.3,0.0,1.0);
-    }`;
-  const PFRAG = `
-    varying float vA;
-    void main(){
-      float d=distance(gl_PointCoord, vec2(0.5));
-      float a=smoothstep(0.5,0.0,d)*vA;
-      if(a<0.01) discard;
-      gl_FragColor=vec4(vec3(1.0), a);   // saf beyaz
+      // aspect-correct, y-normalized screen coords centered at 0
+      vec2 uv = (gl_FragCoord.xy * 2.0 - uRes) / uRes.y;
+
+      // orbit camera: rotate a fixed basis by yaw/pitch
+      mat3 R = rotY(uYaw) * rotX(uPitch);
+      vec3 ro = R * vec3(0.0, 0.0, 9.0);            // camera position (distance ~9)
+      vec3 rd = R * normalize(vec3(uv, -2.6));      // ray dir (~2.6 focal length)
+
+      // geodesic integration variables
+      vec3  pos = ro;
+      vec3  vel = rd;                               // unit direction (kept unit each step)
+      // conserved angular momentum^2 from initial conditions
+      vec3  cprod = cross(pos, vel);
+      float h2 = dot(cprod, cprod);
+
+      vec3  col   = vec3(0.0);   // composited disk radiance (front-to-back)
+      float emis  = 0.0;         // separate emissive accumulator (photon ring) over empty space
+      float transmit = 1.0;      // remaining transparency (1 = clear, 0 = fully covered)
+      float hitHorizon = 0.0;
+      vec3  oldpos = pos;
+
+      // disk surface brightness: dim-but-legible when off, full when on.
+      // floor raised so orbiting always reveals the lensed disk regardless of state.
+      float diskGain = mix(0.4, 1.0, clamp(uActive, 0.0, 1.0));
+
+      for (int i = 0; i < STEPS; i++){
+        oldpos = pos;
+
+        // adaptive step: fine near the hole (strong field / thin disk plane),
+        // coarse far away. Catches the second equatorial crossing that forms the
+        // over-the-top / under-the-bottom lensed arc.
+        float r2o = dot(pos, pos);
+        float ro_ = sqrt(max(r2o, 1e-6));
+        float dt  = DT * clamp(ro_ * 0.35, 0.35, 1.6);
+
+        // advance position, bend velocity toward the hole, renormalize direction.
+        pos += vel * dt;
+        float r2 = dot(pos, pos);
+        float r  = sqrt(max(r2, 1e-6));
+
+        // Schwarzschild null-geodesic fictitious force: -1.5 * h2 * pos / r^5.
+        // Base of pow() is guarded positive. Clamp magnitude to bound the
+        // near-field blow-up (NaN-safe).
+        vec3  acc = -1.5 * h2 * pos / pow(max(r2, 1e-6), 2.5);
+        float am  = min(length(acc), 50.0);
+        acc = am * normalize(acc + vec3(1e-9));
+        vel += acc * dt;
+        // null geodesic -> photon speed constant; keep |vel| = 1 so the bend is
+        // physically consistent and step-rate independent.
+        vel = normalize(vel);
+
+        // event horizon: swallowed -> pure black, opaque, stop
+        if (r < RS){
+          hitHorizon = 1.0;
+          transmit = 0.0;
+          break;
+        }
+
+        // bright thin photon ring near the photon sphere (r ~ 1.5).
+        // EMISSIVE over empty space: accumulate into its own channel so it is NOT
+        // erased where the ray ultimately escapes (transmit ~ 1). Always on (pure
+        // lensing, independent of uActive). Signed-base squaring (d*d) is NaN-safe.
+        float d    = (r - 1.5) * 9.0;
+        float ring = exp(-d * d);
+        emis += ring * 0.10 * transmit;
+
+        // accretion disk lives in the y = 0 equatorial plane.
+        // detect plane crossing by sign change of y between consecutive samples.
+        if (oldpos.y * pos.y < 0.0){
+          float lambda = oldpos.y / (oldpos.y - pos.y);   // interp factor to y=0
+          vec3  hit = mix(oldpos, pos, lambda);           // exact crossing point
+          float rr  = length(hit.xz);
+          float m   = diskMask(rr);
+          if (m > 0.0){
+            // relativistic Doppler beaming: gas orbiting toward the camera is
+            // beamed bright, the receding side dim -> the iconic asymmetry.
+            vec3  vdir = normalize(vec3(-hit.z, 0.0, hit.x)); // tangential orbit dir
+            float beam = clamp(dot(vel, vdir) * 0.5 + 0.5, 0.0, 1.0);
+            float doppler = pow(beam, 2.2);                 // base guaranteed >= 0
+            // radial brightness: hotter / brighter toward the inner rim.
+            float radial = smoothstep(DOUT, DIN, rr);
+            // subtle azimuthal swirl so motion reads (stays monochrome white)
+            float ang = atan(hit.z, hit.x);
+            float swirl = 0.9 + 0.1 * sin(ang * 3.0 + uTime * 0.6 - rr * 1.2);
+            float bright = (0.25 + 0.9 * doppler) * (0.4 + 0.6 * radial) * swirl;
+            float a = m * bright * diskGain;                // per-crossing alpha
+            a = clamp(a, 0.0, 1.0);
+            // ACCUMULATE (no break) so the bent ray can cross again ->
+            // secondary lensed image arcing over the top / under the bottom.
+            col      += vec3(1.0) * a * transmit;
+            transmit *= (1.0 - a);
+          }
+        }
+
+        if (transmit < 0.004) break;   // fully covered, early out
+        if (r > ESCAPE) break;          // escaped to infinity -> transparent bg
+      }
+
+      // coverage alpha: opaque at horizon (black), otherwise 1 - transmit.
+      float a = max(hitHorizon, 1.0 - transmit);
+      a = clamp(a, 0.0, 1.0);
+
+      // soft Reinhard rolloff on the disk so the Doppler bright/dim gradient is
+      // preserved instead of hard-clipping to a flat white plateau.
+      col = col / (1.0 + col);
+
+      // premultiplied output. The photon ring is emissive (carries its own alpha),
+      // so it is added AFTER premultiply and contributes to alpha via max(a, emis)
+      // -> it survives over the transparent background instead of being erased.
+      emis = clamp(emis, 0.0, 1.0);
+      vec3  outRGB = col * a + vec3(emis);
+      float outA   = clamp(max(a, emis), 0.0, 1.0);
+      gl_FragColor = vec4(outRGB, outA);
     }`;
 
-  $effect(() => { activeTarget = (app.status === "on" || app.status === "connecting") ? 1 : 0; });
+  $effect(() => {
+    activeTarget = (app.status === "on" || app.status === "connecting") ? 1 : 0;
+  });
 
   function size() {
     const w = host.clientWidth || 1, h = host.clientHeight || 1;
-    renderer.setSize(w, h);
-    camera.aspect = w / h; camera.updateProjectionMatrix();
+    renderer.setSize(w * SCALE, h * SCALE, false);
+    renderer.domElement.style.width = w + "px";
+    renderer.domElement.style.height = h + "px";
+    mat.uniforms.uRes.value.set(w * SCALE, h * SCALE);
   }
 
   function animate() {
     raf = requestAnimationFrame(animate);
-    yaw += (mx * 0.8 - yaw) * 0.06;
-    pitch += (0.5 + my * 0.5 - pitch) * 0.06;
+    const t = clock.getElapsedTime();
+
+    // lerp orbit toward mouse target, plus a slow auto drift so it's never dead
+    const drift = Math.sin(t * 0.12) * 0.35;
+    yaw   += ((mx * 0.9 + drift) - yaw) * 0.05;
+    pitch += ((0.42 + my * 0.45) - pitch) * 0.05;
+    // clamp pitch so it never goes fully edge-on (lensing must stay visible)
+    pitch = Math.max(0.18, Math.min(1.15, pitch));
     active += (activeTarget - active) * 0.05;
-    pMat.uniforms.uTime.value = clock.getElapsedTime();
-    pMat.uniforms.uState.value = active;
-    pMat.uniforms.uPitch.value = pitch;
-    pMat.uniforms.uYaw.value = yaw;
-    (ring.material as THREE.MeshBasicMaterial).opacity = 0.18 + active * 0.7;
+
+    mat.uniforms.uTime.value = t;
+    mat.uniforms.uYaw.value = yaw;
+    mat.uniforms.uPitch.value = pitch;
+    mat.uniforms.uActive.value = active;
     renderer.render(scene, camera);
   }
 
   onMount(() => {
-    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
-    renderer.setClearColor(0x000000, 0); // şeffaf — kutu yok
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, premultipliedAlpha: true });
+    // single resolution control: rely on SCALE via setSize, not devicePixelRatio.
+    renderer.setPixelRatio(1);
+    renderer.setClearColor(0x000000, 0); // transparent — no box
     host.appendChild(renderer.domElement);
 
     scene = new THREE.Scene();
-    camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
-    camera.position.set(0, 0, 7);
+    camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-    // parçacıklar
-    const g = new THREE.BufferGeometry();
-    const aR = new Float32Array(COUNT), aA = new Float32Array(COUNT), aS = new Float32Array(COUNT), aSe = new Float32Array(COUNT);
-    const dummy = new Float32Array(COUNT * 3);
-    for (let i = 0; i < COUNT; i++) {
-      aR[i] = Math.pow(Math.random(), 0.6);
-      aA[i] = Math.random() * Math.PI * 2;
-      aS[i] = 0.6 + Math.random() * 1.0;
-      aSe[i] = Math.random();
-    }
-    g.setAttribute("position", new THREE.BufferAttribute(dummy, 3));
-    g.setAttribute("aRadius", new THREE.BufferAttribute(aR, 1));
-    g.setAttribute("aAngle", new THREE.BufferAttribute(aA, 1));
-    g.setAttribute("aSpeed", new THREE.BufferAttribute(aS, 1));
-    g.setAttribute("aSeed", new THREE.BufferAttribute(aSe, 1));
-    pMat = new THREE.ShaderMaterial({
-      uniforms: { uTime: { value: 0 }, uState: { value: 0 }, uPitch: { value: 0.5 }, uYaw: { value: 0 } },
-      vertexShader: PVERT, fragmentShader: PFRAG,
-      transparent: true, depthWrite: false, depthTest: true, blending: THREE.NormalBlending,
+    const geo = new THREE.PlaneGeometry(2, 2);
+    mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uRes:    { value: new THREE.Vector2(1, 1) },
+        uTime:   { value: 0 },
+        uYaw:    { value: 0 },
+        uPitch:  { value: 0.42 },
+        uActive: { value: 0 },
+      },
+      vertexShader: VERT,
+      fragmentShader: FRAG,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      premultipliedAlpha: true,   // consistent with renderer + shader output
+      blending: THREE.NormalBlending,
     });
-    scene.add(new THREE.Points(g, pMat));
+    scene.add(new THREE.Mesh(geo, mat));
 
-    // olay ufku (saf siyah, opak, parçacıkları arkadan kapatır)
-    const disc = new THREE.Mesh(new THREE.CircleGeometry(RS, 96), new THREE.MeshBasicMaterial({ color: 0x000000 }));
-    scene.add(disc);
-    // foton halkası (ince beyaz)
-    ring = new THREE.Mesh(new THREE.RingGeometry(RS * 1.0, RS * 1.06, 128),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.2, depthWrite: false, side: THREE.DoubleSide }));
-    ring.position.z = 0.01;
-    scene.add(ring);
+    // seed initial state consistently with the $effect (treat 'connecting' as on)
+    activeTarget = (app.status === "on" || app.status === "connecting") ? 1 : 0;
+    active = activeTarget;
 
-    activeTarget = app.status === "on" ? 1 : 0; active = activeTarget;
     size();
     const ro = new ResizeObserver(size); ro.observe(host);
+
     const onMove = (e: PointerEvent) => {
       const r = host.getBoundingClientRect();
       mx = ((e.clientX - r.left) / r.width - 0.5) * 2;
       my = -((e.clientY - r.top) / r.height - 0.5) * 2;
     };
     host.addEventListener("pointermove", onMove);
-    const onVis = () => { if (document.hidden) { cancelAnimationFrame(raf); raf = 0; } else if (!raf) animate(); };
+
+    const onVis = () => {
+      if (document.hidden) { cancelAnimationFrame(raf); raf = 0; }
+      else if (!raf) animate();
+    };
     document.addEventListener("visibilitychange", onVis);
+
     animate();
+
     return () => {
       cancelAnimationFrame(raf); ro.disconnect();
       host.removeEventListener("pointermove", onMove);
       document.removeEventListener("visibilitychange", onVis);
+      geo.dispose(); mat.dispose();
       renderer.dispose();
+      // free the GL context promptly and remove the orphaned canvas (HMR/remount leak)
+      renderer.forceContextLoss();
+      renderer.domElement.remove();
     };
   });
 </script>

@@ -1,6 +1,6 @@
 <script lang="ts">
   import NavRail from "$lib/components/NavRail.svelte";
-  import RiftMark from "$lib/components/RiftMark.svelte";
+  import BlackHole from "$lib/components/BlackHole.svelte";
   import { app } from "$lib/state.svelte";
 
   let active = $state("dashboard");
@@ -37,7 +37,7 @@
     </header>
 
     <section class="hero">
-      <div class="bh-stage"><RiftMark /></div>
+      <div class="bh-stage"><BlackHole /></div>
       <h2 class="hero-title">{heroTitle}</h2>
       <p class="hero-sub">{heroSub}</p>
     </section>
@@ -70,7 +70,7 @@
 
   /* HERO — kara delik butonu */
   .hero { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; }
-  .bh-stage { width: 188px; height: 188px; margin-bottom: 18px; }
+  .bh-stage { width: 340px; height: 340px; margin-bottom: 8px; }
   .hero-title { font-size: 26px; font-weight: 800; letter-spacing: .3px; }
   .hero-sub { color: var(--text-muted); max-width: 460px; text-align: center; line-height: 1.5; }
 
