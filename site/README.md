@@ -1,6 +1,6 @@
-# Rift — landing site
+# evorift — landing site
 
-Rift'in tanıtım sayfası. SvelteKit + `adapter-static` ile **tamamen statik** build (sunucu yok). Hero'daki kara delik, uygulamadaki `BlackHole.svelte`'in dekoratif kopyasıdır (Three.js/WebGL) — orijinal dosyaya dokunulmadı.
+evorift'in tanıtım sayfası. SvelteKit + `adapter-static` ile **tamamen statik** build (sunucu yok). Hero'daki kara delik, uygulamadaki `BlackHole.svelte`'in dekoratif kopyasıdır (Three.js/WebGL) — orijinal dosyaya dokunulmadı.
 
 ## Geliştirme
 
@@ -21,7 +21,7 @@ npm run preview  # statik çıktıyı önizle
 
 Çıktı (`build/`) host-bağımsızdır; kökten servis edilir.
 
-### Cloudflare Pages (önerilen — temiz URL: `rift.pages.dev`)
+### Cloudflare Pages (önerilen — temiz URL: `evorift.pages.dev`)
 1. Cloudflare hesabı → **Pages → Connect to Git** → `evorift/rift` reposu.
 2. Build ayarları:
    - **Root directory:** `site`

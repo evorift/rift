@@ -1,10 +1,15 @@
 <script>
   import BlackHoleHero from "$lib/BlackHoleHero.svelte";
   import { t, getLang, setLang, LANGS, LANG_LABEL } from "$lib/i18n.svelte.js";
+  import { base } from "$app/paths";
+  import { slide } from "svelte/transition";
 
   const BRAND = "evorift";
   const REPO = "https://github.com/evorift/rift";
   const RELEASES = REPO + "/releases";
+  const SPONSOR = "https://github.com/sponsors/evorift";
+
+  let openFaq = $state(-1);
 
   function scrollToGet() {
     document.getElementById("get")?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -26,15 +31,7 @@
 </svelte:head>
 
 {#snippet mark()}
-  <svg class="mark" viewBox="0 0 64 64" aria-hidden="true">
-    <g transform="rotate(-15 32 33)">
-      <ellipse cx="32" cy="33" rx="24" ry="9" fill="none" stroke="var(--accent)" stroke-width="7" opacity="0.18" />
-      <ellipse cx="32" cy="33" rx="24" ry="9" fill="none" stroke="#fff" stroke-width="2.6" opacity="0.95" />
-      <circle cx="32" cy="33" r="12" fill="#000" />
-      <path d="M8 33 A24 9 0 0 0 56 33" fill="none" stroke="#fff" stroke-width="2.6" opacity="0.95" />
-      <path d="M8 33 A24 9 0 0 0 56 33" fill="none" stroke="var(--accent)" stroke-width="7" opacity="0.18" />
-    </g>
-  </svg>
+  <img class="mark" src="{base}/logo.png" alt="" aria-hidden="true" />
 {/snippet}
 
 <a class="skip" href="#get">{t("cta.download")}</a>
@@ -65,6 +62,8 @@
       <BlackHoleHero onactivate={scrollToGet} />
     </div>
 
+    <div class="wordmark">{BRAND}</div>
+
     <span class="chip"><i class="dot"></i>{t("brand.badge")}</span>
     <h1 class="hero-title">{t("hero.title")}</h1>
     <p class="hero-sub">{t("hero.sub")}</p>
@@ -72,8 +71,8 @@
     <div class="cta" id="get">
       <a class="btn primary" href={RELEASES} target="_blank" rel="noopener">⬇ {t("cta.download")}</a>
       <a class="btn" href={REPO} target="_blank" rel="noopener">{t("cta.github")}</a>
+      <a class="btn sponsor" href={SPONSOR} target="_blank" rel="noopener">♥ {t("cta.sponsor")}</a>
     </div>
-    <p class="soon">{t("cta.soon")}</p>
     <span class="platform mono">{t("platform")}</span>
   </section>
 
@@ -103,13 +102,17 @@
     <h2 class="sec-title">{t("faq.title")}</h2>
     <div class="faq-list">
       {#each faqs as i (i)}
-        <details class="faq-item">
-          <summary>
+        <div class="faq-item" class:open={openFaq === i}>
+          <button class="faq-q" aria-expanded={openFaq === i} onclick={() => (openFaq = openFaq === i ? -1 : i)}>
             <span>{t(`faq.q${i}`)}</span>
             <span class="chev" aria-hidden="true"></span>
-          </summary>
-          <p>{t(`faq.a${i}`)}</p>
-        </details>
+          </button>
+          {#if openFaq === i}
+            <div class="faq-a" transition:slide={{ duration: 240 }}>
+              <p>{t(`faq.a${i}`)}</p>
+            </div>
+          {/if}
+        </div>
       {/each}
     </div>
   </section>
@@ -128,6 +131,7 @@
     <a href="#how">{t("nav.how")}</a>
     <a href="#faq">{t("nav.faq")}</a>
     <a href={REPO} target="_blank" rel="noopener">GitHub</a>
+    <a href={SPONSOR} target="_blank" rel="noopener">♥ {t("cta.sponsor")}</a>
   </nav>
   <p class="ss">{t("foot.smartscreen")}</p>
   <p class="made">{t("foot.made")} · © {BRAND}</p>
@@ -161,7 +165,7 @@
     border-bottom: 1px solid var(--border-soft);
   }
   .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: 0.2px; }
-  .mark { width: 30px; height: 30px; flex: none; }
+  .mark { width: 32px; height: 32px; flex: none; display: block; object-fit: contain; }
   .brand-name { font-size: 19px; }
   .top-nav { display: flex; gap: 22px; margin-left: 8px; color: var(--text-muted); font-size: 14px; font-weight: 600; }
   .top-nav a:hover { color: var(--text); }
@@ -178,24 +182,34 @@
   .bh-stage {
     width: min(440px, 80vw);
     height: min(440px, 80vw);
-    margin-bottom: 12px;
+    margin-bottom: 4px;
     filter: drop-shadow(0 0 60px rgba(57, 230, 107, 0.10));
+  }
+  .wordmark {
+    font-size: clamp(32px, 7vw, 56px);
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    line-height: 1;
+    color: #fff;
+    margin: 0 0 18px;
   }
   .hero-title {
     font-size: clamp(34px, 6vw, 60px);
-    line-height: 1.05;
+    line-height: 1.14;
     font-weight: 800;
     letter-spacing: -0.02em;
     margin: 16px 0 0;
-    background: linear-gradient(180deg, #fff 60%, #b9c3b9);
+    padding-bottom: 0.12em;
+    background: linear-gradient(180deg, #fff 62%, #b9c3b9);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
   }
   .hero-sub { max-width: 600px; margin-top: 16px; color: var(--text-muted); font-size: clamp(15px, 2.2vw, 18px); }
   .cta { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-top: 30px; scroll-margin-top: 120px; }
-  .soon { margin-top: 14px; color: var(--text-dim); font-size: 13px; }
-  .platform { margin-top: 6px; color: var(--text-dim); font-size: 12px; letter-spacing: 0.05em; }
+  .btn.sponsor { color: var(--accent); }
+  .btn.sponsor:hover { border-color: var(--accent); color: var(--accent); }
+  .platform { margin-top: 14px; color: var(--text-dim); font-size: 12px; letter-spacing: 0.05em; }
 
   .sec-title { text-align: center; font-size: clamp(24px, 4vw, 34px); font-weight: 800; letter-spacing: -0.01em; margin-bottom: 32px; }
 
@@ -234,32 +248,38 @@
     background: var(--bg-surface);
     border: 1px solid var(--border-soft);
     border-radius: var(--radius);
-    padding: 0 20px;
+    overflow: hidden;
   }
-  .faq-item summary {
+  .faq-q {
+    width: 100%;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    list-style: none;
-    cursor: pointer;
-    padding: 18px 0;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font: inherit;
     font-weight: 700;
     font-size: 16px;
+    text-align: left;
+    padding: 18px 20px;
+    cursor: pointer;
   }
-  .faq-item summary::-webkit-details-marker { display: none; }
+  .faq-q:hover { background: var(--bg-elevated); }
   .chev { flex: none; position: relative; width: 16px; height: 16px; }
   .chev::before, .chev::after {
     content: "";
     position: absolute;
     background: var(--accent);
     border-radius: 2px;
-    transition: transform 0.2s ease, opacity 0.2s ease;
+    transition: transform 0.25s ease, opacity 0.25s ease;
   }
   .chev::before { top: 7px; left: 0; width: 16px; height: 2px; }
   .chev::after { top: 0; left: 7px; width: 2px; height: 16px; }
-  .faq-item[open] .chev::after { transform: scaleY(0); opacity: 0; }
-  .faq-item p { color: var(--text-muted); font-size: 14.5px; padding: 0 0 20px; max-width: 64ch; }
+  .faq-item.open .chev::after { transform: scaleY(0); opacity: 0; }
+  .faq-a { padding: 0 20px; }
+  .faq-a p { color: var(--text-muted); font-size: 14.5px; padding: 0 0 20px; max-width: 64ch; }
 
   .footer {
     max-width: var(--maxw);
