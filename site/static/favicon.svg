@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="14" fill="#000000"/>
+  <g transform="rotate(-15 32 33)">
+    <!-- accretion ring back half -->
+    <ellipse cx="32" cy="33" rx="24" ry="9" fill="none" stroke="#39E66B" stroke-width="7" opacity="0.18"/>
+    <ellipse cx="32" cy="33" rx="24" ry="9" fill="none" stroke="#ffffff" stroke-width="2.6" opacity="0.95"/>
+    <!-- event horizon -->
+    <circle cx="32" cy="33" r="12" fill="#000000"/>
+    <!-- front half of ring, drawn over the hole -->
+    <path d="M8 33 A24 9 0 0 0 56 33" fill="none" stroke="#ffffff" stroke-width="2.6" opacity="0.95"/>
+    <path d="M8 33 A24 9 0 0 0 56 33" fill="none" stroke="#39E66B" stroke-width="7" opacity="0.18"/>
+  </g>
+</svg>
