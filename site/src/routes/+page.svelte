@@ -30,7 +30,7 @@
     { k: "warp", ico: "⤳" },
   ];
 
-  const faqs = [1, 2, 3, 4, 5, 6];
+  const faqs = [1, 2, 3, 4, 5];
 </script>
 
 <svelte:head>
