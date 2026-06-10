@@ -48,7 +48,6 @@ WinDivert-2.2.2-A/
 # --- UI source (private — only backend is public) ---
 /src/
 /static/
-/site/
 /build/
 svelte.config.js
 vite.config.js
