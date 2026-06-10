@@ -628,25 +628,7 @@ pub fn run() {
                 std::thread::sleep(std::time::Duration::from_millis(1000));
             });
 
-            // ---- anti-cheat watcher (Faz 3.6): durum değişince "anticheat" event'i ----
-            let ac_handle = app.handle().clone();
-            std::thread::spawn(move || {
-                let mut last: Option<String> = None;
-                loop {
-                    let cur = detect_anticheat();
-                    if cur != last {
-                        let _ = ac_handle.emit(
-                            "anticheat",
-                            AntiCheat {
-                                active: cur.is_some(),
-                                name: cur.clone().unwrap_or_default(),
-                            },
-                        );
-                        last = cur;
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                }
-            });
+
 
             Ok(())
         })
