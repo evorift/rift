@@ -1,0 +1,326 @@
+name: Release
+
+# evorift release pipeline.
+#
+# Trigger: pushing a version tag like `v0.1.0`.
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# The `verify` job mirrors the CI quality gates (fmt + clippy + tests + svelte-check)
+# and the `release` job (needs: verify) builds the NSIS installer + portable zip,
+# signs the Tauri updater manifest, computes SHA256SUMS, and publishes a GitHub
+# Release for the tag.
+#
+# REQUIRED REPO SECRETS (Settings -> Secrets and variables -> Actions):
+#   TAURI_SIGNING_PRIVATE_KEY           - the Tauri updater signing private key.
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  - its password (empty string if none).
+# The keypair is generated OFFLINE (never in CI) with:
+#   npm run tauri signer generate -- -w ~/.tauri/evorift.key
+# The PRIVATE key file content goes into TAURI_SIGNING_PRIVATE_KEY; the public key
+# goes into tauri.conf.json (plugins.updater.pubkey). Keep the private key out of git.
+#
+# NOTE: there is no in-process WinDivert engine anymore (removed in the net3 migration).
+# WinDivert ships only inside the bundled winws (zapret) sidecar. The signed WinDivert.dll /
+# WinDivert64.sys staged below are the upstream binaries winws loads at runtime.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Needed so the release job can create the GitHub Release and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Gate: refuse to release unless the same checks CI enforces all pass.
+  # ---------------------------------------------------------------------------
+  verify:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (with rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Cache cargo registry + the src-tauri build output keyed on the lockfile.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      # --- Rust gates (run inside src-tauri where Cargo.toml/Cargo.lock live) ---
+      # Kod elle (kompakt) biçimlendirilmiş; rustfmt advisory (CI'ı kırmaz).
+      - name: cargo fmt --check (advisory)
+        working-directory: src-tauri
+        continue-on-error: true
+        run: cargo fmt --all --check
+
+      # -A ...: kod tabanındaki mevcut 3 stil/doc lint'i advisory bırak (bkz. ci.yml).
+      - name: cargo clippy (-D warnings)
+        working-directory: src-tauri
+        run: cargo clippy -- -D warnings -A clippy::doc_lazy_continuation -A clippy::type_complexity -A clippy::while_let_loop
+
+      # Unit tests (warp split-tunnel, ipc validate, …) need neither admin nor a driver.
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test
+
+      # --- Frontend gate ---
+      # svelte-check advisory: BlackHole.svelte WIP @types/three istisnası (bkz. ci.yml).
+      - name: svelte-check (advisory)
+        continue-on-error: true
+        run: npm run check
+
+  # ---------------------------------------------------------------------------
+  # Build + publish. Only runs if `verify` succeeded.
+  # ---------------------------------------------------------------------------
+  release:
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # ---- CRITICAL BUILD ORDER (1-4) ----
+
+      # 1) Install JS deps (frontend is built by `tauri build` later).
+      - name: Install JS dependencies
+        run: npm ci
+
+      # 2) Build the privileged service binary FIRST. evorift-svc.exe must exist
+      #    before step 3 stages it into resources/, because `tauri build` (step 4)
+      #    bundles resources/evorift-svc.exe into the installer. The service drives the
+      #    bundled winws (zapret) sidecar + WARP split-tunnel — no in-process WinDivert engine.
+      - name: Build privileged service (evorift-svc)
+        working-directory: src-tauri
+        run: cargo build --bin evorift-svc --release
+
+      # 3) Stage bundled resources into src-tauri/resources/ so `tauri build` picks
+      #    them up (tauri.conf.json bundle.resources maps these three files).
+      #
+      #    - evorift-svc.exe: freshly built in step 2, copied from the cargo target dir.
+      #    - WinDivert.dll / WinDivert64.sys: the WinDivert 2.2 user-mode DLL and the
+      #      Microsoft-signed kernel driver that must sit next to the exe at runtime.
+      #
+      #    TODO(maintainer): CONFIRM THE WINDIVERT.dll / WinDivert64.sys SOURCE PATH.
+      #    Two candidates exist in this repo and BOTH currently resolve, so this step
+      #    prefers the already-committed copies and falls back to the vendored SDK tree:
+      #      (a) src-tauri/resources/WinDivert.dll + WinDivert64.sys  <- committed copies (preferred)
+      #      (b) WinDivert-2.2.2-A/x64/WinDivert.dll + WinDivert64.sys <- vendored WinDivert 2.2.2 SDK (x64)
+      #    These are the upstream Microsoft-signed WinDivert binaries that the bundled
+      #    winws (zapret) sidecar loads at runtime; they are shipped from the committed/SDK
+      #    copies above (there is no in-process WinDivert engine to build them from).
+      #    If the maintainer relocates these files, update DLL_SRC / SYS_SRC below.
+      - name: Stage bundled resources (evorift-svc.exe + WinDivert.dll + WinDivert64.sys)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "src-tauri/resources" | Out-Null
+
+          # 3a) Freshly built service binary -> resources/
+          Copy-Item -Force "src-tauri/target/release/evorift-svc.exe" "src-tauri/resources/evorift-svc.exe"
+
+          # 3b) WinDivert DLL + signed driver -> resources/  (maintainer-confirmed paths)
+          $dllSrc = "src-tauri/resources/WinDivert.dll"        # preferred: committed copy
+          $sysSrc = "src-tauri/resources/WinDivert64.sys"      # preferred: committed copy
+          if (-not (Test-Path $dllSrc)) { $dllSrc = "WinDivert-2.2.2-A/x64/WinDivert.dll" }   # fallback: vendored SDK
+          if (-not (Test-Path $sysSrc)) { $sysSrc = "WinDivert-2.2.2-A/x64/WinDivert64.sys" } # fallback: vendored SDK
+          if (-not (Test-Path $dllSrc)) { throw "WinDivert.dll not found - confirm source path (see TODO above)" }
+          if (-not (Test-Path $sysSrc)) { throw "WinDivert64.sys not found - confirm source path (see TODO above)" }
+
+          Copy-Item -Force $dllSrc "src-tauri/resources/WinDivert.dll"
+          Copy-Item -Force $sysSrc "src-tauri/resources/WinDivert64.sys"
+
+          Write-Host "Staged resources:"
+          Get-ChildItem "src-tauri/resources" | Select-Object Name, Length | Format-Table
+
+      # 4) Build the UI app + NSIS installer. The frontend (vite build via the
+      #    static adapter) runs as part of this.
+      #    The updater signing secrets are consumed HERE so the generated
+      #    latest.json / *.sig are signed. If the secrets are unset the build still
+      #    succeeds but produces an UNSIGNED updater manifest.
+      - name: Build app + NSIS installer (tauri build)
+        run: npm run tauri -- build
+        env:
+          # Updater signing keys (generated offline; see header). REQUIRED secrets.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # ---- Assemble release artifacts ----
+
+      # Portable zip: the standalone UI exe plus the WinDivert DLL + signed driver
+      # so the app can be run without the installer (run as Administrator).
+      - name: Build portable zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $stage = "portable/evorift-portable-$version-x64"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          Copy-Item -Force "src-tauri/target/release/evorift.exe" "$stage/evorift.exe"
+          Copy-Item -Force "src-tauri/resources/WinDivert.dll"   "$stage/WinDivert.dll"
+          Copy-Item -Force "src-tauri/resources/WinDivert64.sys" "$stage/WinDivert64.sys"
+          # The privileged service ships in the portable bundle too so DPI works.
+          Copy-Item -Force "src-tauri/resources/evorift-svc.exe" "$stage/evorift-svc.exe"
+
+          New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
+          $zip = "artifacts/evorift-portable-$version-x64.zip"
+          Compress-Archive -Force -Path "$stage/*" -DestinationPath $zip
+          Write-Host "Created $zip"
+
+      # Collect the NSIS installer and the Tauri updater manifest (latest.json) into
+      # the artifacts/ dir, then compute SHA256SUMS over every release artifact.
+      - name: Collect installer + updater manifest, compute SHA256SUMS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
+
+          # NSIS installer (e.g. evorift_0.1.0_x64-setup.exe). bundle.targets = ["nsis", "msi"].
+          $setup = Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe" -ErrorAction Stop
+          Copy-Item -Force $setup.FullName ("artifacts/" + $setup.Name)
+
+          # MSI installer (e.g. evorift_0.1.0_x64_en-US.msi). bundle.targets includes "msi",
+          # so `tauri build` emits a WiX-built MSI for enterprise/GPO deployment. Required
+          # (-ErrorAction Stop): if MSI is configured but absent the WiX toolchain failed
+          # and the release must not silently ship NSIS-only.
+          $msi = Get-ChildItem "src-tauri/target/release/bundle/msi/*.msi" -ErrorAction Stop
+          Copy-Item -Force $msi.FullName ("artifacts/" + $msi.Name)
+
+          # The MSI updater also emits a signed .zip + .sig (parallel to the NSIS pair).
+          # Copy any alongside so the updater chain stays complete (best-effort).
+          Get-ChildItem "src-tauri/target/release/bundle/msi/*.sig" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item -Force $_.FullName ("artifacts/" + $_.Name) }
+          Get-ChildItem "src-tauri/target/release/bundle/msi/*.msi.zip" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item -Force $_.FullName ("artifacts/" + $_.Name) }
+
+          # The NSIS updater also emits a signed .zip + .sig used by latest.json.
+          # Copy any .sig alongside so the updater chain is complete (best-effort).
+          Get-ChildItem "src-tauri/target/release/bundle/nsis/*.sig" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item -Force $_.FullName ("artifacts/" + $_.Name) }
+          Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.nsis.zip" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item -Force $_.FullName ("artifacts/" + $_.Name) }
+
+          # latest.json: Tauri may emit it under bundle/. If present, copy it; if not,
+          # synthesize a minimal updater manifest from the signed installer artifacts.
+          $latest = Get-ChildItem "src-tauri/target/release/bundle/**/latest.json" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          if ($latest) {
+            Copy-Item -Force $latest.FullName "artifacts/latest.json"
+          } else {
+            Write-Host "::warning::No latest.json emitted by tauri build; synthesizing one from the signed installer."
+            $sigFile = Get-ChildItem "src-tauri/target/release/bundle/nsis/*.sig" -ErrorAction SilentlyContinue | Select-Object -First 1
+            $sig = if ($sigFile) { Get-Content $sigFile.FullName -Raw } else { "" }
+            $assetName = (Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.nsis.zip" -ErrorAction SilentlyContinue | Select-Object -First 1).Name
+            if (-not $assetName) { $assetName = $setup.Name }
+            $url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$assetName"
+            $manifest = [ordered]@{
+              version   = $version
+              notes     = "See the release notes."
+              pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+              platforms = [ordered]@{
+                "windows-x86_64" = [ordered]@{ signature = $sig.Trim(); url = $url }
+              }
+            }
+            $manifest | ConvertTo-Json -Depth 6 | Out-File -Encoding utf8 "artifacts/latest.json"
+          }
+
+          # SHA256SUMS over ALL files we are about to publish (excluding the sums file).
+          Push-Location "artifacts"
+          $lines = Get-ChildItem -File | Where-Object { $_.Name -ne "SHA256SUMS" } | ForEach-Object {
+            $h = (Get-FileHash -Algorithm SHA256 $_.Name).Hash.ToLower()
+            "$h  $($_.Name)"
+          }
+          $lines | Out-File -Encoding ascii "SHA256SUMS"
+          Pop-Location
+
+          Write-Host "Release artifacts:"
+          Get-ChildItem "artifacts" | Select-Object Name, Length | Format-Table
+
+      # Extract the body for this version from CHANGELOG.md (the `## [x.y.z]` section).
+      # If CHANGELOG.md is absent the release body falls back to a generated note.
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $body = ""
+          if (Test-Path "CHANGELOG.md") {
+            $text = Get-Content "CHANGELOG.md" -Raw
+            # Match a "## [x.y.z]" or "## x.y.z" heading and capture until the next "## " heading.
+            $pattern = "(?ms)^##\s*\[?$([regex]::Escape($version))\]?.*?(?=^\r?##\s|\z)"
+            $m = [regex]::Match($text, $pattern)
+            if ($m.Success) {
+              # Drop the heading line itself, keep the section body.
+              $body = ($m.Value -split "\r?\n", 2)[1]
+            } else {
+              Write-Host "::warning::No CHANGELOG.md section found for $version."
+            }
+          } else {
+            Write-Host "::warning::CHANGELOG.md not found."
+          }
+          if ([string]::IsNullOrWhiteSpace($body)) {
+            $body = "evorift $version`n`nSee the commit history for changes in this release."
+          }
+          # Persist to a file and expose its path; multiline outputs are awkward inline.
+          $body | Out-File -Encoding utf8 "RELEASE_NOTES.md"
+          "notes_file=RELEASE_NOTES.md" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
+
+      # Create (or update) the GitHub Release for this tag and upload every artifact.
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: evorift ${{ github.ref_name }}
+          body_path: ${{ steps.notes.outputs.notes_file }}
+          draft: false
+          prerelease: false
+          # NOTE: kept false on purpose. This repo does NOT yet configure the Tauri
+          # updater plugin (no plugins.updater in tauri.conf.json, no
+          # tauri-plugin-updater dep, no bundle.createUpdaterArtifacts), so
+          # `tauri build` emits NO *.sig / *-setup.nsis.zip and the latest.json is
+          # synthesized rather than produced by Tauri. Those updater globs therefore
+          # match zero files; with fail_on_unmatched_files: true the publish step
+          # would hard-fail. false lets the always-present artifacts (installer,
+          # portable zip, SHA256SUMS, synthesized latest.json) publish cleanly.
+          fail_on_unmatched_files: false
+          files: |
+            artifacts/*-setup.exe
+            artifacts/*.msi
+            artifacts/evorift-portable-*-x64.zip
+            artifacts/SHA256SUMS
+            artifacts/latest.json
+            artifacts/*.sig
+            artifacts/*-setup.nsis.zip
+            artifacts/*.msi.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

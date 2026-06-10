@@ -8,8 +8,8 @@
 
 <div class="titlebar" data-tauri-drag-region>
   <div class="brand" data-tauri-drag-region>
-    <span class="logo">◈</span>
-    <span class="name">Rift</span>
+    <img class="logo" src="/app-icon.png" alt="" aria-hidden="true" />
+    <span class="name">evorift</span>
   </div>
 
   <div class="controls">
@@ -35,7 +35,7 @@
     flex: 0 0 auto;
   }
   .brand { display: flex; align-items: center; gap: 9px; pointer-events: none; }
-  .logo { color: var(--accent); font-size: 16px; }
+  .logo { width: 18px; height: 18px; border-radius: 5px; display: block; }
   .name { font-weight: 700; letter-spacing: .5px; }
   .controls { display: flex; height: 100%; }
   .ctl {

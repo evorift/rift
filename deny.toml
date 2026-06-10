@@ -1,0 +1,111 @@
+# deny.toml — cargo-deny configuration for evorift (Rust + Tauri v2 tree)
+#
+# Run with:   cargo deny check
+# Subsets:    cargo deny check advisories | licenses | bans | sources
+#
+# This config targets the CURRENT cargo-deny schema (v0.16+). Older keys such as
+# [advisories] vulnerability=/unmaintained=/yanked= and [licenses] copyleft=/
+# default=/unlicensed=/allow-osi-fsf-free= have been REMOVED upstream and are NOT
+# used here — they would emit "unknown field" warnings/errors.
+#
+# NOTE: the FIRST `cargo deny check licenses` run may surface a handful of extra
+# SPDX licenses pulled in by transitive crates (the Tauri/winit/webview stack is
+# large). When that happens, read the reported license id and append it to the
+# [licenses] allow list below if it is a permissive/known-good license, or add a
+# scoped [[licenses.exceptions]] entry if it is copyleft and acceptable only for a
+# specific crate. Do not blanket-allow copyleft globally.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [graph] — which dependency graph cargo-deny walks.
+# ─────────────────────────────────────────────────────────────────────────────
+[graph]
+# evorift ships Windows-only. Restrict the scan to the Windows target so we don't
+# flag advisories/licenses for crates that only compile on Linux/macOS and are
+# never shipped. Remove/extend this list if you start building for other targets.
+targets = [
+    { triple = "x86_64-pc-windows-msvc" },
+]
+# evorift ships with default features only (no optional cargo features). The DPI-bypass
+# is done by the bundled winws (zapret) sidecar + WARP split-tunnel — no in-process engine
+# crate — so there is nothing extra to pull in. Kept `true` (a no-op here) for resilience
+# if optional features are reintroduced later.
+all-features = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [advisories] — RUSTSEC advisory-db checks (vulnerabilities, unmaintained, yanked).
+# Severity/category gating is no longer configured here in the v0.16+ schema;
+# cargo-deny errors on advisories by default. Silence individual ones via `ignore`.
+# ─────────────────────────────────────────────────────────────────────────────
+[advisories]
+# Advisory database(s) to pull and check against.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# Per-advisory allowlist. Keep EMPTY until a real advisory blocks the build, then
+# add the specific RUSTSEC id (optionally with a justification) so the suppression
+# is auditable. Example:
+#   ignore = [
+#       "RUSTSEC-2024-0000",                       # short reason it's not exploitable here
+#       { id = "RUSTSEC-2024-0001", reason = "transitive, code path unused" },
+#   ]
+ignore = []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [licenses] — SPDX license policy.
+# Permissive set commonly required across a Rust + Tauri dependency tree.
+# ─────────────────────────────────────────────────────────────────────────────
+[licenses]
+# Minimum confidence (0.0–1.0) for the license-text matcher to accept a detected
+# license. 0.9 is strict enough to avoid false matches while tolerating minor
+# header variations.
+confidence-threshold = 0.9
+
+# Globally-allowed permissive licenses. Add more here as the first scan reports
+# them (see header note). NOTE: no copyleft (LGPL/GPL/AGPL) license appears in
+# this list on purpose — copyleft is handled per-crate under exceptions below.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "CC0-1.0",
+    "0BSD",
+    "BSL-1.0",
+]
+
+# Per-crate license exceptions: none currently. The old in-process WinDivert engine
+# (LGPL `windivert` / `windivert-sys` crates) was removed in the net3 migration, so the
+# LGPL exceptions they required are gone. WinDivert itself still ships as the upstream
+# Microsoft-signed WinDivert.dll / WinDivert64.sys bundled INSIDE winws (separate,
+# unmodified binary files, see THIRD-PARTY.md) — those are not cargo crates, so cargo-deny
+# does not scan them. If a future dep needs a non-`allow`-listed license, add a scoped
+# [[licenses.exceptions]] entry here.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [bans] — duplicate versions, wildcard deps, and (optional) explicit deny/allow.
+# ─────────────────────────────────────────────────────────────────────────────
+[bans]
+# A large Tauri tree almost always has a few crates pinned at multiple versions
+# (e.g. windows-sys, bitflags, syn). Warn so it stays visible without failing CI.
+multiple-versions = "warn"
+# Deny `version = "*"` dependencies — they are unreproducible and a supply-chain
+# foot-gun. evorift pins every dependency, so this should stay clean.
+wildcards = "deny"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [sources] — where crates are allowed to come from.
+# ─────────────────────────────────────────────────────────────────────────────
+[sources]
+# Reject any crate from a registry other than the default (crates.io) ...
+unknown-registry = "deny"
+# ... and any git dependency not explicitly allow-listed below. evorift currently
+# uses only crates.io, so both stay deny.
+unknown-git = "deny"
+# crates.io is the implicit default registry and needs no entry. If you ever add a
+# vetted git dependency, list its repo URL under `allow-git = [ ... ]`.
+allow-git = []

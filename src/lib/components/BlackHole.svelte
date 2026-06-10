@@ -1,9 +1,8 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import * as THREE from "three";
   import { app } from "$lib/state.svelte";
 
-  let host: HTMLButtonElement;
+  let host = $state<HTMLButtonElement>();
   let raf = 0;
   let renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.OrthographicCamera;
   let mat: THREE.ShaderMaterial;
@@ -165,7 +164,7 @@
       float depth = CAMD - Pc.z;                         // kameraya uzaklık (büyük = uzak)
       float sr = length(2.0 * Pc.xy / depth);            // apparent ekran yarıçapı (gölge kenarı ~0.29)
       float behind = smoothstep(0.05, -0.05, Pc.z);      // Pc.z<0 -> kara deliğin ARKA tarafı
-      float inSil  = smoothstep(0.64, 0.42, sr);         // siluet ~1.6x
+      float inSil  = smoothstep(0.56, 0.368, sr);        // siluet ~1.4x
       float occ = behind * inSil;
       float grow = sin(life * 3.14159265);               // küçükten büyüyüp -> küçülerek yok
       gl_PointSize = (0.4 + 3.6 * grow) * 1.7;
@@ -190,6 +189,7 @@
   });
 
   function size() {
+    if (!host) return;
     const w = host.clientWidth || 1, h = host.clientHeight || 1;
     renderer.setSize(w * SCALE, h * SCALE, false);
     renderer.domElement.style.width = w + "px";
@@ -233,11 +233,15 @@
     renderer.render(scene, camera);
   }
 
-  onMount(() => {
+  // Hareketi azalt açıkken WebGL'i hiç başlatma → statik kara delik ikonu gösterilir.
+  // host ($state) ve app.reduceMotion'a bağlı: tercih değişince temizlenip yeniden kurulur.
+  $effect(() => {
+    if (app.reduceMotion || !host) return;
+    const el = host; // guard sonrası kesin tanımlı (closure'larda TS daralması için)
     renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, premultipliedAlpha: true });
     renderer.setPixelRatio(1);
     renderer.setClearColor(0x000000, 0);
-    host.appendChild(renderer.domElement);
+    el.appendChild(renderer.domElement);
 
     scene = new THREE.Scene();
     camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -281,23 +285,23 @@
     points = new THREE.Points(pg, pMat); points.visible = false; points.renderOrder = 2; scene.add(points);
 
     size();
-    const obs = new ResizeObserver(size); obs.observe(host);
+    const obs = new ResizeObserver(size); obs.observe(el);
     const onMove = (e: PointerEvent) => {
-      const r = host.getBoundingClientRect();
+      const r = el.getBoundingClientRect();
       mx = ((e.clientX - r.left) / r.width - 0.5) * 2;
       my = -((e.clientY - r.top) / r.height - 0.5) * 2;
     };
-    host.addEventListener("pointermove", onMove);
+    el.addEventListener("pointermove", onMove);
     const onLeave = () => { mx = 0; my = 0; };   // ayrılınca dinlenme pozisyonuna dön
-    host.addEventListener("pointerleave", onLeave);
+    el.addEventListener("pointerleave", onLeave);
     const onVis = () => { if (document.hidden) { cancelAnimationFrame(raf); raf = 0; } else if (!raf) animate(); };
     document.addEventListener("visibilitychange", onVis);
     animate();
 
     return () => {
       cancelAnimationFrame(raf); obs.disconnect();
-      host.removeEventListener("pointermove", onMove);
-      host.removeEventListener("pointerleave", onLeave);
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerleave", onLeave);
       document.removeEventListener("visibilitychange", onVis);
       geo.dispose(); mat.dispose(); pg.dispose(); pMat.dispose();
       renderer.dispose(); renderer.forceContextLoss(); renderer.domElement.remove();
@@ -306,19 +310,40 @@
 </script>
 
 <div class="bh-wrap">
-  <button class="bh" bind:this={host} onclick={() => app.toggle()} aria-label="Kara delik · aç/kapat">
-    <svg class="power" class:show={app.status === "off"} viewBox="0 0 100 100" aria-hidden="true">
-      <circle class="rim" cx="50" cy="50" r="46" />
-      <line class="stem" x1="50" y1="27" x2="50" y2="47" />
-      <path class="arc" d="M34 37 A20 20 0 1 0 66 37" />
-    </svg>
-  </button>
+  {#if app.reduceMotion}
+    <!-- Hareketi azalt: animasyonsuz statik kara delik ikonu (uygulama markası ile aynı geometri) -->
+    <button class="bh" onclick={() => app.toggle()} aria-label="Kara delik · aç/kapat">
+      <svg class="bh-icon" viewBox="0 0 64 66" aria-hidden="true">
+        <g transform="rotate(-15 32 33)">
+          <ellipse cx="32" cy="33" rx="24" ry="9" fill="none" stroke="var(--accent)" stroke-width="7" opacity="0.22" />
+          <ellipse cx="32" cy="33" rx="24" ry="9" fill="none" stroke="#fff" stroke-width="2.6" opacity="0.97" />
+          <circle cx="32" cy="33" r="12" fill="#000" />
+          <path d="M8 33 A24 9 0 0 0 56 33" fill="none" stroke="#fff" stroke-width="2.6" opacity="0.97" />
+          <path d="M8 33 A24 9 0 0 0 56 33" fill="none" stroke="var(--accent)" stroke-width="7" opacity="0.22" />
+        </g>
+      </svg>
+      <svg class="power" class:show={app.status === "off"} viewBox="0 0 100 100" aria-hidden="true">
+        <circle class="rim" cx="50" cy="50" r="46" />
+        <line class="stem" x1="50" y1="27" x2="50" y2="47" />
+        <path class="arc" d="M34 37 A20 20 0 1 0 66 37" />
+      </svg>
+    </button>
+  {:else}
+    <button class="bh" bind:this={host} onclick={() => app.toggle()} aria-label="Kara delik · aç/kapat">
+      <svg class="power" class:show={app.status === "off"} viewBox="0 0 100 100" aria-hidden="true">
+        <circle class="rim" cx="50" cy="50" r="46" />
+        <line class="stem" x1="50" y1="27" x2="50" y2="47" />
+        <path class="arc" d="M34 37 A20 20 0 1 0 66 37" />
+      </svg>
+    </button>
+  {/if}
 </div>
 
 <style>
   .bh-wrap { position: relative; width: 100%; height: 100%; }
   .bh { position: relative; width: 100%; height: 100%; border: none; background: transparent; cursor: pointer; padding: 0; display: block; }
   :global(.bh canvas) { position: absolute; inset: 0; z-index: 1; display: block; width: 100% !important; height: 100% !important; }
+  .bh-icon { position: absolute; inset: 0; margin: auto; width: 76%; height: 76%; z-index: 1; }
   .power {
     position: absolute; inset: 0; margin: auto; width: 60%; height: 60%; z-index: 2;
     pointer-events: none; opacity: 0; transform: scale(.9);

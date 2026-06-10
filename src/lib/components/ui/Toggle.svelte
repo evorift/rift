@@ -3,11 +3,13 @@
   let {
     checked = $bindable(false),
     label = "",
+    ariaLabel,
     disabled = false,
     onchange,
   }: {
     checked?: boolean;
     label?: string;
+    ariaLabel?: string; // görünür metin olmadan erişilebilir ad (label boşken)
     disabled?: boolean;
     onchange?: (v: boolean) => void;
   } = $props();
@@ -26,7 +28,7 @@
   {disabled}
   role="switch"
   aria-checked={checked}
-  aria-label={label}
+  aria-label={ariaLabel ?? label}
   onclick={toggle}
 >
   <span class="track"><span class="thumb"></span></span>

@@ -13,6 +13,8 @@ dist/
 # --- Rust / Tauri ---
 target/
 **/target/
+# Geçici cargo check hedef dizini (CLAUDE.md kural #3: paralel-güvenli kontrol; commit edilmez)
+**/tmp_check/
 
 # --- Secrets / signing keys (ASLA commit etme) ---
 .env
@@ -32,3 +34,13 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# WinDivert SDK indirme klasörü (3rd-party, MS lisanslı — repoya konmaz)
+# Not: in-process WinDivert motoru net3 geçişiyle kaldırıldı; WinDivert artık yalnız bundle'lı
+# winws (zapret) içinde (resources/winws/) gelir. Bu klasör release staging'de imzalı sürücü
+# için yedek kaynak olarak kalır (bkz. .github/workflows/release.yml).
+WinDivert-2.2.2-A/
+/src-tauri/target/verify-claude/
+
+# evorift internal — not distributed
+.claude/

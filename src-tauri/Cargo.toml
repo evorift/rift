@@ -1,9 +1,12 @@
 [package]
-name = "rift"
+name = "evorift"
 version = "0.1.0"
 description = "Unblock Discord, Roblox & games without a VPN (Windows DPI-bypass)."
 authors = ["evorift"]
 edition = "2021"
+# İki binary var (evorift = UI uygulaması, evorift-svc = ayrıcalıklı servis).
+# `cargo run` / `tauri dev` varsayılan olarak UI'yı çalıştırsın.
+default-run = "evorift"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -11,15 +14,36 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "rift_lib"
+name = "evorift_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon: sistem tepsisi simgesi + menü (Faz 4.7). Crate'ler (tray-icon, muda) zaten Cargo.lock'ta.
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+interprocess = "2"
+getrandom = "0.2"
+
+# Ayrıcalıklı servis (evorift-svc) — yalnız Windows
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+# admin (elevation) tespiti — gerçek sistem komutları yalnız yükseltilmiş süreçte çalışır
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis"] }
+# named-pipe SDDL ACL (P7 A0): LocalSystem servisi pipe'ı açarken interaktif kullanıcıya erişim verir →
+# non-admin app bağlanabilir (yoksa "Access is denied"). interprocess SecurityDescriptor::deserialize(&U16CStr).
+widestring = "1"
+
+# Release binary sertleştirme (docs/13 P7 · B1) — SIFIR RİSK (yalnız `cargo build --release`/`tauri build`'i
+# etkiler; dev/`cargo check` değişmez). Ters mühendisliğe sürtünme + daha küçük binary.
+[profile.release]
+strip = "symbols"      # sembol + debug tablolarını sil (fonksiyon/modül adları gizlenir)
+lto = "fat"            # whole-program inline → fonksiyon sınırı/akış sezgisini bulanıklaştırır
+codegen-units = 1      # daha agresif inline
+opt-level = 3
+overflow-checks = true # güvenlik sigortası: validate()/run_limit aritmetiğinde sessiz taşma yerine panik
 

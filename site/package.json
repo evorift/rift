@@ -2,7 +2,7 @@
   "name": "evorift-site",
   "version": "0.1.0",
   "private": true,
-  "description": "evorift landing page — unblock Discord, Roblox & games without a VPN.",
+  "description": "evorift landing page — unblock Discord, Roblox & games in one click.",
   "type": "module",
   "scripts": {
     "dev": "vite dev",

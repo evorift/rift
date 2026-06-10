@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Rift",
+  "productName": "evorift",
   "version": "0.1.0",
-  "identifier": "com.evorift.rift",
+  "identifier": "com.evorift.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Rift",
+        "title": "evorift",
         "width": 1000,
         "height": 680,
         "minWidth": 900,
@@ -24,12 +24,51 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-src 'none'; frame-ancestors 'none'; connect-src 'self' ipc: http://ipc.localhost",
+      "devCsp": {
+        "default-src": "'self'",
+        "script-src": "'self' 'unsafe-inline' 'unsafe-eval'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data: blob: https: http:",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420 ws://127.0.0.1:1420 http://127.0.0.1:1420",
+        "worker-src": "'self' blob:"
+      },
+      "freezePrototype": true,
+      "dangerousDisableAssetCspModification": ["style-src"]
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "msi"],
+    "resources": {
+      "resources/WinDivert.dll": "WinDivert.dll",
+      "resources/WinDivert64.sys": "WinDivert64.sys",
+      "resources/evorift-svc.exe": "evorift-svc.exe",
+      "resources/winws/winws.exe": "winws/winws.exe",
+      "resources/winws/cygwin1.dll": "winws/cygwin1.dll",
+      "resources/winws/WinDivert.dll": "winws/WinDivert.dll",
+      "resources/winws/WinDivert64.sys": "winws/WinDivert64.sys",
+      "resources/winws/windivert.filter/windivert_part.discord_media.txt": "winws/windivert.filter/windivert_part.discord_media.txt",
+      "resources/winws/windivert.filter/windivert_part.discord_media_wide.txt": "winws/windivert.filter/windivert_part.discord_media_wide.txt",
+      "resources/winws/windivert.filter/windivert_part.stun.txt": "winws/windivert.filter/windivert_part.stun.txt",
+      "resources/winws/windivert.filter/windivert_part.quic_initial_ietf.txt": "winws/windivert.filter/windivert_part.quic_initial_ietf.txt",
+      "resources/winws/files/quic_initial_www_google_com.bin": "winws/files/quic_initial_www_google_com.bin",
+      "resources/warp/wgcf.exe": "warp/wgcf.exe",
+      "resources/warp/wireguard.exe": "warp/wireguard.exe",
+      "resources/warp/wintun.dll": "warp/wintun.dll"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "./windows/hooks.nsh",
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "./windows/header.bmp",
+        "sidebarImage": "./windows/sidebar.bmp",
+        "languages": ["English", "Turkish", "Spanish", "Russian"],
+        "displayLanguageSelector": true
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -37,5 +76,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "active": false,
+      "endpoints": [
+        "https://github.com/evorift/rift/releases/latest/download/latest.json"
+      ],
+      "dialog": true
+    }
   }
 }

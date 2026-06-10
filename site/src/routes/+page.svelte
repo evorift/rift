@@ -17,12 +17,20 @@
 
   const features = [
     { k: "unblock", ico: "◎" },
-    { k: "novpn", ico: "⚡" },
+    { k: "perapp", ico: "⚡" },
     { k: "safe", ico: "🛡" },
     { k: "light", ico: "❉" },
   ];
 
-  const faqs = [1, 2, 3, 4, 5];
+  // Sayfanın "kaputun altında" bölümündeki 3 mod kartı — uygulamada Apps ekranındaki segment butonlarıyla
+  // birebir eşleşir. icon = simge, k = i18n anahtarı kökü (how.mode.<k>.t/d).
+  const modes = [
+    { k: "off",  ico: "○" },
+    { k: "dpi",  ico: "▚" },
+    { k: "warp", ico: "⤳" },
+  ];
+
+  const faqs = [1, 2, 3, 4, 5, 6];
 </script>
 
 <svelte:head>
@@ -96,6 +104,26 @@
       <li><span class="num">2</span><p>{t("how.2")}</p></li>
       <li><span class="num">3</span><p>{t("how.3")}</p></li>
     </ol>
+
+    <h3 class="tech-title">{t("how.tech.title")}</h3>
+    <p class="tech-lead">{t("how.tech.lead")}</p>
+    <div class="tech-grid">
+      <article class="tech-card">
+        <span class="t-ico" aria-hidden="true">▚</span>
+        <h4>{t("how.dpi.t")}</h4>
+        <p>{t("how.dpi.d")}</p>
+      </article>
+      <article class="tech-card">
+        <span class="t-ico" aria-hidden="true">⤳</span>
+        <h4>{t("how.warp.t")}</h4>
+        <p>{t("how.warp.d")}</p>
+      </article>
+      <article class="tech-card">
+        <span class="t-ico" aria-hidden="true">◴</span>
+        <h4>{t("how.cf.t")}</h4>
+        <p>{t("how.cf.d")}</p>
+      </article>
+    </div>
   </section>
 
   <section class="faq" id="faq">
@@ -241,6 +269,21 @@
     font-weight: 800;
   }
   .steps p { color: var(--text-muted); font-size: 14.5px; padding-top: 4px; }
+
+  .tech-title { text-align: center; font-size: clamp(18px, 2.6vw, 22px); font-weight: 800; letter-spacing: -0.01em; margin: 44px 0 6px; }
+  .tech-lead { text-align: center; max-width: 620px; margin: 0 auto 26px; color: var(--text-muted); font-size: 14.5px; }
+  .tech-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .tech-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    padding: 22px;
+    transition: border-color 0.2s ease;
+  }
+  .tech-card:hover { border-color: var(--accent-dim); }
+  .t-ico { display: inline-flex; font-size: 20px; color: var(--accent); margin-bottom: 10px; filter: drop-shadow(0 0 10px var(--accent-glow)); }
+  .tech-card h4 { font-size: 16px; margin-bottom: 8px; }
+  .tech-card p { color: var(--text-muted); font-size: 14px; line-height: 1.55; }
 
   .faq { padding: 40px 0 56px; }
   .faq-list { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }

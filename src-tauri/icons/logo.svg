@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="48%" r="60%">
+      <stop offset="0%" stop-color="#0b140d" />
+      <stop offset="100%" stop-color="#000000" />
+    </radialGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="46%">
+      <stop offset="0%" stop-color="#39e66b" stop-opacity="0.24" />
+      <stop offset="68%" stop-color="#39e66b" stop-opacity="0.05" />
+      <stop offset="100%" stop-color="#39e66b" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)" />
+  <rect width="1024" height="1024" fill="url(#glow)" />
+
+  <!-- kara delik markası (site favicon ile aynı geometri, büyük) -->
+  <g transform="translate(512 524) scale(15) rotate(-15) translate(-32 -33)">
+    <ellipse cx="32" cy="33" rx="24" ry="9" fill="none" stroke="#39e66b" stroke-width="7" opacity="0.22" />
+    <ellipse cx="32" cy="33" rx="24" ry="9" fill="none" stroke="#ffffff" stroke-width="2.6" opacity="0.97" />
+    <circle cx="32" cy="33" r="12" fill="#000000" />
+    <path d="M8 33 A24 9 0 0 0 56 33" fill="none" stroke="#ffffff" stroke-width="2.6" opacity="0.97" />
+    <path d="M8 33 A24 9 0 0 0 56 33" fill="none" stroke="#39e66b" stroke-width="7" opacity="0.22" />
+  </g>
+</svg>
