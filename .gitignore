@@ -49,6 +49,6 @@ WinDivert-2.2.2-A/
 /src/
 /static/
 /build/
-svelte.config.js
-vite.config.js
-tsconfig.json
+/svelte.config.js
+/vite.config.js
+/tsconfig.json
