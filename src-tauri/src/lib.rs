@@ -558,6 +558,10 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // Otomatik güncelleme (yalnız release; desktop). Frontend açılışta check() çağırır →
+        // varsa imzalı setup'ı indirip kurar, sonra process plugin'iyle yeniden başlatır.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         // Pencere kapatma = tray'e gizle (Faz 4.7). Gerçek çıkış yalnız tray "Çıkış" menüsünden.
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

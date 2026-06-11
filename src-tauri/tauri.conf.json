@@ -40,6 +40,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["nsis", "msi"],
     "resources": {
       "resources/WinDivert.dll": "WinDivert.dll",
@@ -61,6 +62,7 @@
     "windows": {
       "nsis": {
         "installMode": "perMachine",
+        "template": "./windows/installer.nsi",
         "installerHooks": "./windows/hooks.nsh",
         "installerIcon": "icons/icon.ico",
         "headerImage": "./windows/header.bmp",
@@ -79,11 +81,13 @@
   },
   "plugins": {
     "updater": {
-      "active": false,
       "endpoints": [
         "https://github.com/evorift/rift/releases/latest/download/latest.json"
       ],
-      "dialog": true
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE4ODAzQTk4QTlFQ0FDMjUKUldRbHJPeXBtRHFBcVBEcExkNFozcStsN3E4aHUrejFVQ2wzMW5MWTFYU2ZLNExMdHYyNm9zYm4K",
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }
