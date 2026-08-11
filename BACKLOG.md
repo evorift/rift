@@ -19,6 +19,45 @@ markers here should be kept in sync with `BACKEND-V2-PLAN.md`'s own checkboxes.
 
 ---
 
+## P0 — Ahead of V0: may fix the CURRENT app, not the rewrite (surfaced 2026-08-12, NOT implemented here)
+
+These are bugs in the app **as it ships today**, named in `net3/SOLUTION.md` as things
+`net3` fixed for its own console app but that the packaged `evorift` GUI may still have.
+Cheap relative to the v2 rewrite, and per the plan's own "V0.1.3 close it first" precedent
+in the earlier BACKEND-MASTER-PLAN.md phase, worth doing before V0 if they're confirmed
+still present in the current `src-tauri` code — **not confirmed here, only cited and
+queued.** Do not implement yet.
+
+### P0-a — Admin manifest / `requireAdministrator`
+Self-elevate instead of silently failing when WinDivert/service setup needs admin.
+Cited: `net3/SOLUTION.md` line 213 ("Why: WinDivert (the kernel driver `winws` uses to
+intercept packets) needs admin. Embedding `requireAdministrator` means the app
+self‑elevates (UAC) instead of silently failing — exactly what happened to the GUI build
+when it lost elevation after packaging."). Check whether `src-tauri`'s current manifest
+already does this before assuming it's missing.
+
+### P0-b — EXE-relative path resolution, not cwd-relative
+Resolve `winws.exe`/filter files relative to the executable, not the current working
+directory, which changes once packaged. Cited: `net3/SOLUTION.md` line 487 ("The previous
+GUI broke for boring reasons — lost admin, cwd‑relative paths, WinDivert version
+conflict."). `engine.rs::bundle_dir()` (per docs/DISCOVERY.md) may already do this —
+verify before assuming it needs fixing.
+
+### P0-c — Bundle the matching WinDivert build, kill stale `winws`, enforce single instance
+Cited: `net3/SOLUTION.md` line 163 ("Windows loads exactly one global `WinDivert.sys`; two
+apps shipping different versions makes the second fail... `resources/winws/` bundles the
+**same** WinDivert build the engine uses, and `net3` kills stale `winws` first (single
+instance)."), reinforced at line 465 ("`winws` exits instantly. WinDivert driver conflict —
+another bypass loaded a different WinDivert version... `net3` kills stale `winws` first.").
+**Note on citation accuracy:** line 335 (also initially suggested for this item) is
+actually about a different point — service vs. console app preference for persistence —
+not the kill-stale/single-instance claim; not cited here for that reason, per this
+session's own recompute-don't-assume discipline. This item is also **the evidence base for
+CLAUDE.md rule 3b(b)** — whatever P2 (below) finds about version-conflict handling feeds
+back into whether P0-c is even still needed in the current app or only in the v2 rewrite.
+
+---
+
 ## DECISIONS — architect-ready briefs (drafted, not yet called)
 
 Per `architect`'s input contract: decision question, options with cost/risk, binding
@@ -572,7 +611,10 @@ conflict... two apps shipping different versions makes the second fail" /
 a binding condition on K1 (rule 3b) and an acceptance criterion on V1.1. Needs at least: how
 `net3`/`winws` currently detects and handles this (`net3/src/winws.rs` per the doc), and
 whether the same detection approach is available to a v2 in-process capture layer, or needs
-its own mechanism. **Feeds the K1 brief directly** — see the K1 pre-work note above.
+its own mechanism. **Feeds the K1 brief directly** — see the K1 pre-work note above. Also
+relevant to **P0-c**: whether the current app already bundles a matching WinDivert build
+and kills stale `winws` (as `net3` does) affects whether P0-c is still an open bug in the
+shipped app or already handled.
 
 ---
 

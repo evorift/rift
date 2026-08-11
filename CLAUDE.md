@@ -87,5 +87,13 @@ isn't a unit test → `evorift-live-verification` skill; the user runs that pass
 - Telemetry defaults to off; if on, the user can see the raw data sent.
 - WinDivert is LGPL: dynamically linked, license text distributed.
 
+## Known pitfalls
+- **A loaded WinDivert driver does nothing until a process opens a handle with a filter —
+  driver presence is not evidence of protection.** (`net3/SOLUTION.md` line 77: the driver
+  was loaded from a prior app but idle, so nothing was actually bypassing while it looked
+  installed.) This is the concrete, capture-layer form of the "applied ≠ working" principle
+  (rule 9) — a check that only confirms the driver/service is loaded, without confirming a
+  filter is actually open and matching traffic, is not a working protection check.
+
 ## Distribution
 Ship only build output (exe + MSI + portable ZIP + SHA256SUMS). `src/`, `docs/`, `.claude/` stay private (gitignored); user-facing docs = README only.
