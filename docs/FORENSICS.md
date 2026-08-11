@@ -264,6 +264,148 @@ per the task, that decision belongs to the user.
 
 ---
 
+## B6 — net3/SOLUTION.md §3.3 (primary source)
+
+_Source: `C:\Users\Evrim\Desktop\projects\net3\SOLUTION.md` (516 lines, outside this repo,
+read directly per user instruction). Quotes and line numbers only — no summary, no
+interpretation, no recommendation, per the instruction this section was produced under._
+
+**Document status line (line 3):** "Status: **WORKING** as of 2026-06-10."
+
+**§3.3 in full, verbatim (lines 94-117):**
+
+> "### 3.3 Pure DPI — what failed (the crux)
+> Despite all that, the **Discord desktop app stayed stuck on "Connecting…"**. The renderer log told the real story:
+> ```
+> [GatewaySocket] CONNECTED wss://gateway.discord.gg/?encoding=etf&v=9&compress=zstd-stream
+> [GatewaySocket] [ACK TIMEOUT] reconnecting…
+> [GatewaySocket] [WS CLOSED] (false, 1006, ) retrying…
+> ChunkLoadError: Loading chunk 99096 failed after 3 retries
+> ```
+> - The gateway **connects**, the client **sends IDENTIFY**, but the **`READY` never arrives** → heartbeat ACK times out → `1006` (abnormal close) → reconnect loop.
+> - The app's large JS asset bundles **loaded fine** (so it's not generic large‑inbound / MTU), and a plain `encoding=json` gateway connection **survived 58 s** with heartbeats (so it's **not** a stateful "kill the connection after N seconds" reset).
+> - The **only** difference between the surviving test and the failing real client: Discord uses **`encoding=etf & compress=zstd-stream`** with a **large compressed `READY`**. The ISP's DPI inspects and **drops that bulk Discord gateway data**.
+>
+> Everything tried to beat it at the DPI layer **failed**:
+>
+> | Lever | Result |
+> |---|---|
+> | Catch‑all desync | gateway stalls |
+> | Hostlist desync (zapret service) | gateway stalls |
+> | Lower MTU (1400) | gateway stalls |
+> | Block QUIC → force TCP | gateway stalls |
+> | `--wssize` (TCP window clamp) | gateway stalls |
+> | Clear cache / clean reinstall‑launch | gateway stalls |
+>
+> **Conclusion: handshake‑level DPI desync cannot carry Discord's gateway payload on this ISP.** This matches `evorift`'s own design, which already had a "WARP split‑tunnel for Discord" engine — pure DPI was never enough for the desktop client here."
+
+**Directly relevant context outside §3.3, from the TL;DR (lines 13-17):**
+
+> "Turkey blocks Discord and Roblox with **two layers** of DPI:
+> 1. **SNI / handshake blocking** — the ISP reads the TLS `ClientHello` (which contains `discord.com`, `roblox.com`, …) and resets the connection. → Beaten by **DPI desync** (`winws`, the zapret engine): fragment + fake the `ClientHello` so the censor can't read the hostname.
+> 2. **Deep / stateful inspection of Discord's gateway data** — even after the handshake passes, the ISP inspects and **drops Discord's bulk gateway data** (the large, zstd‑compressed `READY` payload). Handshake‑level desync **cannot** beat this. → Beaten only by **tunnelling Discord's traffic** so the DPI never sees it."
+
+**§3.2, what worked, immediately before §3.3 (lines 81-92), for scope contrast:**
+
+> "Launched `winws` with the proven catch‑all strategy (see §5). Immediately:
+> ```
+> DISCORD_AFTER = OK 200   {"url":"wss://gateway.discord.gg"}
+> ROBLOX_AFTER  = OK 200
+> ```
+> Verified **every** Discord/Roblox domain handshakes through the bypass (TLS‑OK): `discord.com`, `gateway.discord.gg`, `cdn.discordapp.com`, `media.discordapp.net`, `discord.media`, `remote-auth-gateway.discord.gg`, `updates.discord.com`, `roblox.com`, … DNS was already clean Cloudflare (`1.1.1.1`).
+>
+> The Discord **gateway WebSocket** even returned its live hello frame through pure DPI:
+> ```
+> op:10  {"heartbeat_interval":41250, ...}
+> ```"
+
+**§11 Key Learnings, item 1 and item 4 (lines 484, 487) — the only other passages in the
+document that generalize beyond this one diagnostic session:**
+
+> "1. **Turkey's Discord block is two‑layered.** SNI desync beats the handshake; it does **not** beat the deep inspection of Discord's gateway data. Proof: handshake + gateway `Hello` pass on pure DPI, but the large zstd `READY` is dropped (`ACK TIMEOUT` / `1006`), while a tiny `json` gateway connection survives 58 s."
+
+> "4. **The previous GUI broke for boring reasons** — lost admin, cwd‑relative paths, WinDivert version conflict. `net3` fixes all three structurally (admin manifest, EXE‑relative resolution, bundled matching WinDivert + single instance)."
+
+**Every other mention of "WinDivert" in the document (all outside §3.3, none applied to the
+gateway-payload failure — listed because the task asked for every section mentioning
+WinDivert):**
+
+> Line 77: "The **WinDivert driver** was already loaded from `C:\Program Files\evorift\winws\WinDivert64.sys` (the old app), but **idle** — a loaded driver does nothing until a process opens a handle with a filter. So nothing was actually bypassing → Discord blocked."
+
+> Line 163: "**WinDivert version conflict.** Windows loads exactly one global `WinDivert.sys`; two apps shipping different versions makes the second fail. → `resources/winws/` bundles the **same** WinDivert build the engine uses, and `net3` kills stale `winws` first (single instance)."
+
+> Line 213: "Why: WinDivert (the kernel driver `winws` uses to intercept packets) needs admin. Embedding `requireAdministrator` means the app self‑elevates (UAC) instead of silently failing — exactly what happened to the GUI build when it lost elevation after packaging."
+
+> Line 304: "`run_foreground()` also detects an instant‑exit of `winws` (the classic **WinDivert driver conflict**) and prints a clear hint to stop the other bypass and retry."
+
+> Line 465: "**`winws` exits instantly.** WinDivert driver conflict — another bypass loaded a different WinDivert version. Stop it (`evorift` service, the standalone zapret service) and retry; `net3` kills stale `winws` first."
+
+**Every mention of "QUIC" in the document:**
+
+> Line 113 (§3.3 table): "Block QUIC → force TCP | gateway stalls" — listed as one of six
+> failed mitigation attempts.
+
+> Line 265 (code comment, §4 implementation section): "// QUIC (UDP/443, HTTP/3)" — a
+> source-code comment, not a narrative statement.
+
+> Line 324 (§5, `winws` strategy table): "QUIC | `--filter-l7=quic --dpi-desync=fake
+> --dpi-desync-repeats=11 --dpi-desync-fake-quic=files\quic_initial_www_google_com.bin` |
+> Fake QUIC initial for HTTP/3" — a `winws` configuration row, describing general QUIC/HTTP-3
+> handling, not scoped to the Discord gateway failure.
+
+**Whether the document names or tests evorift's own in-process pure-Rust engine
+(`engine/real.rs`) specifically: NOT STATED.** Every DPI-desync test result in §3.2/§3.3
+(the catch-all desync, hostlist desync, MTU change, QUIC block, `--wssize`, cache clear) is
+run through `winws` (per line 82: "Launched `winws` with the proven catch‑all strategy").
+No line in the document names `real.rs`, "pure-Rust engine," "in-process engine," or any
+evorift-internal packet-processing code as having been tested or as the subject of §3.3's
+conclusion.
+
+### Answers to the three questions
+
+**1. Was the failure purely functional (couldn't bypass), or does it also name instability,
+leaks, antivirus, driver-load problems, or connectivity loss?**
+
+Within §3.3 itself: purely functional/behavioral. Verbatim: "the Discord desktop app
+stayed stuck on 'Connecting…'" (line 95); "the `READY` never arrives → heartbeat ACK times
+out → `1006` (abnormal close) → reconnect loop" (line 102); "Conclusion: handshake‑level
+DPI desync cannot carry Discord's gateway payload on this ISP" (line 117). No mention of
+crash, instability, memory/resource leak, or antivirus anywhere in §3.3 or the rest of the
+document (not found in any read passage).
+
+Driver-load problems ARE named in the document, but not in §3.3 and not about the same
+failure: "**WinDivert version conflict**. Windows loads exactly one global `WinDivert.sys`;
+two apps shipping different versions makes the second fail" (line 163); "The previous GUI
+broke for boring reasons — lost admin, cwd‑relative paths, **WinDivert version conflict**"
+(line 487). These are framed as separate, previously-fixed operational/packaging bugs in
+"the previous GUI build," not as part of §3.3's gateway-payload finding.
+
+**2. Did it fail on ALL traffic, or specifically on QUIC/gateway while working on TCP/TLS
+SNI? Quote the exact scope.**
+
+Specifically scoped, and not to "QUIC" as such. Handshake/SNI-level blocking is explicitly
+beaten: "Verified **every** Discord/Roblox domain handshakes through the bypass (TLS‑OK)"
+(line 87); Roblox and general HTTPS are unaffected (line 23 of the summary table: "Roblox +
+general HTTPS | DPI desync (`winws`/zapret), direct | SNI block is fully beaten by desync;
+no tunnel needed"). The named failure is scoped to "Discord's bulk gateway data (the large,
+zstd‑compressed `READY` payload)" (line 16) over the gateway **WebSocket** connection
+(`wss://gateway.discord.gg`, line 97) — a TCP/TLS/WSS-carried payload, not a QUIC/UDP
+mechanism. "Block QUIC → force TCP" is listed as one of six things that were *tried and
+failed* to fix the stall (line 113) — QUIC is named as an eliminated lever, not as the
+identified cause.
+
+**3. Is there any statement that the approach itself is unworkable, as opposed to that
+particular implementation being insufficient?**
+
+Yes: "**Conclusion: handshake‑level DPI desync cannot carry Discord's gateway payload on
+this ISP.**" (line 117) and "Handshake‑level desync **cannot** beat this. → Beaten only by
+**tunnelling Discord's traffic** so the DPI never sees it." (line 16). Both state the
+limitation at the level of the **approach** ("handshake-level DPI desync" as a category),
+not a specific implementation's insufficiency — but both are also explicitly scoped to one
+specific problem ("Discord's gateway payload" / "this"), not a general claim that
+handshake-level desync is unworkable overall (the same document shows it fully working for
+SNI/handshake blocking, Roblox, and general HTTPS in the same diagnostic session).
+
 ## Unproven (complete list)
 
 - The root cause of the systematic +1 off-by-one in whole-file `"path:1-N"` line-count
@@ -276,10 +418,18 @@ per the task, that decision belongs to the user.
 - The in-process engine's RAII/`Drop` handling on the WinDivert handle (B2) — not
   documented in the one available pre-git source (the archived build log).
 - The in-process engine's behavior on panic, process kill, or app exit (B2) — same reason.
-- The full contents of `net3/SOLUTION.md §3.3`, cited as the primary source for "the old
-  engine couldn't open desktop Discord" — that file lives at
-  `C:\Users\Evrim\Desktop\projects\net3\`, outside this repo and outside the directories
-  available to this session. Only the citation to it, not its content, is confirmed.
+- ~~The full contents of `net3/SOLUTION.md §3.3`~~ — **resolved, see B6.** Read directly;
+  quoted verbatim with line numbers.
+- **New from B6:** whether evorift's own in-process pure-Rust engine (`engine/real.rs`) was
+  ever itself tested against the Discord gateway-payload problem. `net3/SOLUTION.md` never
+  names it — every desync test in §3.2/§3.3 was run through `winws` (the external zapret
+  tool), not evorift's own engine. `engine.rs:13-15`'s claim that the old engine "couldn't
+  open desktop Discord (see net3/SOLUTION.md §3.3)" is therefore citing a document that
+  demonstrates the failure via a different (though architecturally similar — both are
+  handshake-level DPI desync) implementation, not the specific one being cited for. Whether
+  `real.rs` was separately tested and failed the same way, or whether the engine.rs comment
+  is generalizing from winws's documented failure to the same architectural class, is
+  UNPROVEN from any source read so far.
 - Whether the BSOD incident (`docs/_archive/done-bsod.md`) had any causal role in the
   `real.rs` removal decision beyond the one UI-hiding mitigation it documents — the two
   events are both real and both documented, but no source ties them together as
