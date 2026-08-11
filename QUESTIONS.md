@@ -10,9 +10,13 @@ history has value.
 
 ## Answered
 
-### Q1 — Hard rule 3 vs. the V1.1 plan item (raised end of Phase 2, answered same session, 2026-08-11)
+### Q1 (SUPERSEDED 2026-08-12 — see "Q1 — revised" below) — Hard rule 3 vs. the V1.1 plan item
 
-**Decision: keep rule 3 as a hard ban.** In-process WinDivert capture stays off-limits.
+> ⚠ **This decision was reversed the next day, once its own cited evidence was actually
+> read.** Kept below for history; do not act on it. Current state is "Q1 — revised" further
+> down this file.
+
+**Original decision (2026-08-11): keep rule 3 as a hard ban.** In-process WinDivert capture stays off-limits.
 V1.1 as currently written in BACKEND-V2-PLAN.md ("`PacketSource` trait + WinDivert
 implementation" = in-process capture) is **rejected** and needs to be redesigned to
 achieve live strategy control while keeping the capture layer external-process-based
@@ -26,6 +30,35 @@ accepts live rule updates, vs. some other mechanism) — not which in-process dr
 (see the K1 brief in BACKLOG.md's DECISIONS section, rewritten to reflect this). Original
 plan text in BACKEND-V2-PLAN.md is annotated in place, not rewritten — the actual
 technical redesign of V1.1 is architect/user work, not something invented here.
+
+### Q1 — revised (closed 2026-08-12, see docs/FORENSICS.md B6)
+
+**What changed:** the 2026-08-11 decision rested on a citation
+(`engine.rs:13-15` → "old engine couldn't open desktop Discord, see net3/SOLUTION.md §3.3")
+that nobody had actually read. Read directly (docs/FORENSICS.md B6, quotes-only, no
+interpretation): §3.3 tests `winws` (external zapret), never evorift's own `real.rs`
+engine — no source names or tests that specific implementation. Its finding is that **no**
+desync engine, in-process or external, can carry Discord's gateway WebSocket payload
+(zstd-compressed `READY`, dropped by deep inspection) — SNI/handshake-level blocking is
+explicitly confirmed working via the same desync approach in the same document, for
+Discord, Roblox, and general HTTPS alike. The failure is a tunneling gap, not an
+in-process-capture hazard. The 2026-08-11 decision had treated a citation as evidence
+without reading it — the same failure class as the A2 off-by-one finding (see
+`docs/MIGRATION.md`'s "recompute, don't re-read" methodology note), generalized: **an
+unread citation is not verified evidence, regardless of which document it's in.**
+
+**Revised decision:** CLAUDE.md rule 3 rewritten (not just annotated) — Discord's gateway
+payload isn't a desync problem for any engine; it's carried by WARP split-tunnel, as the
+product already does. New rule 3b permits in-process packet capture under two proven
+conditions: handle-lifecycle safety (RAII/`Drop`, panic, kill, exit — undocumented for the
+old engine, a gap not a clean record) and WinDivert version-conflict handling against a
+co-installed zapret/winws (a real, previously-hit failure per `net3/SOLUTION.md` §4.2/§9).
+
+**Follow-through:** V1.1 and K1 unblocked in `BACKLOG.md`/`BACKEND-V2-PLAN.md` (K1 reframed
+as WinDivert-vs-TUN, with 3b as a binding constraint either way). Two new unsolved items
+opened: P1 (warp.rs and net3/SOLUTION.md give different causes for the same Discord-desktop
+symptom — investigate before V6) and P2 (WinDivert version-conflict handling mechanics —
+feeds K1 directly). Neither is resolved here.
 
 <details><summary>Original question text (for context)</summary>
 

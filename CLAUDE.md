@@ -21,16 +21,26 @@ evosys    Windows side: packet capture (WinDivert), service, firewall, DNS,
 evoapp    Tauri commands, state machine, verification (canary probe), UI bridge.
 ```
 
-⚠ **Open tension, not yet resolved — see docs/QUESTIONS.md:** critical rule 3 below
-(current v1 doctrine) says not to reintroduce an in-process WinDivert engine; the v2
-plan's V1.1 explicitly plans to build one (`PacketSource` trait, WinDivert as the first
-implementation), and K1 in BACKEND-V2-PLAN.md frames the open question as "WinDivert vs.
-TUN," not "in-process vs. external." Do not silently resolve this — flagged for the user.
+**Resolved 2026-08-12 (see docs/QUESTIONS.md Q1, docs/FORENSICS.md B6):** rule 3 below was
+rewritten — the original "no in-process WinDivert" ban rested on a citation
+(`net3/SOLUTION.md §3.3`) that was never actually read until the forensics pass; read
+directly, it tests `winws` (external), not evorift's own engine, and its finding is that
+*no* desync engine can carry Discord's gateway payload — a tunneling problem, not an
+in-process-vs-external one. V1.1 and K1 are unblocked as of this commit.
 
 ## Critical rules (do not break)
 1. **Don't touch `BlackHole.svelte`** — the user develops it in a separate chat; don't "fix" it even if it errors.
 2. **Don't run `npm run build`/`check` while `tauri dev` runs** — it kills vite and drops the dev session.
-3. **DPI engine = bundled `winws` (zapret) sidecar + WARP split-tunnel** (net3 migration). There is **no in-process WinDivert engine** anymore (`engine/real.rs` + tls/packet/quic/voice removed); don't reintroduce one. Keep `resources/winws/` + the WARP bundle intact.
+3. **Discord's gateway payload is not a desync problem.** No engine, in-process or
+   external, is expected to carry it — `net3/SOLUTION.md` §3.3 established that
+   handshake-level desync cannot, tested on `winws`. Discord is carried by tunnel (WARP
+   split). Any claim that an engine "opens Discord desktop" must be proven live via
+   `evorift-live-verification` before it is written anywhere. (Evidence: docs/FORENSICS.md B6.)
+3b. **In-process packet capture is permitted**, under two conditions: (a) handle lifecycle
+   (RAII/`Drop`, panic, kill, process exit) is proven by test — the old engine's was never
+   documented, which is a gap, not a clean record; (b) WinDivert version conflict with a
+   co-installed zapret/winws is handled (a real, previously-hit failure — see net3/SOLUTION.md
+   §4.2/§9, "WinDivert version conflict").
 4. **Privileged ops** (tweak/DNS/QoS/firewall) need **admin** to apply; as a normal user they are audit-only `(sim)`.
 5. **Parallel sessions:** re-read `ipc.rs`/`service.rs`/`Cargo.toml` before editing; run `cargo check --target-dir tmp_check` so you don't break the running dev process.
 6. **BlackHole/three type warnings** in `svelte-check` are pre-existing and fine; aim for 0 errors in our own files.

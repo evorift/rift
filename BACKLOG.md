@@ -26,31 +26,32 @@ constraints, evidence summaries (not raw code). **Model: Opus 5 per user directi
 only, no broad exploration on that model; any exploration these briefs still need should
 run on a Sonnet subagent first and get folded into the brief before calling architect.**
 
-### K1 — Capture layer (BLOCKS V1.1; reframed 2026-08-11, see QUESTIONS.md Q1)
+### K1 — Capture layer (RE-REFRAMED 2026-08-12, see QUESTIONS.md Q1, docs/FORENSICS.md B6)
 
-- **Decision question:** How does evorift get runtime-tunable DPI-bypass strategy control
-  while keeping packet capture external-process-based (CLAUDE.md hard rule 3 — no
-  in-process WinDivert — is a confirmed hard ban, not up for debate in this brief)?
+- **Decision question:** WinDivert vs. a TUN-based path for `evosys`'s `PacketSource`
+  implementation. In-process capture itself is no longer in question — CLAUDE.md rule 3b
+  permits it, since `net3/SOLUTION.md §3.3`'s finding (no desync engine can carry Discord's
+  gateway payload) turned out to be about a tunneling gap, not an in-process-capture ban.
 - **Options to evaluate (fill in cost/risk before calling architect):**
-  1. Long-lived external capture process with a control channel/IPC that accepts live rule
-     updates (successor to today's restart-per-strategy-change `winws` spawn model —
-     evidence: `engine.rs:712-718`, `service.rs:216-231`, confirmed by docs-auditor
-     2026-08-11). Needs: does `winws`/zapret support this natively, or does it need a fork/wrapper?
-  2. A different external tool that already exposes live reconfiguration (research needed —
-     candidate for a `pattern-scout` pass on other DPI-bypass tools' architectures before
-     the brief goes to architect).
-  3. Something else — surface if either 1 or 2 turns out infeasible.
-- **Binding constraints:** CLAUDE.md hard rule 3 (no in-process WinDivert, confirmed
-  standing), rule 5/11 (strategy change must not drop the connection once V2.3 lands),
-  `evorift-security-hygiene` (no silent privilege escalation, rollback journal coverage
-  for whatever process/service model results), single-developer maintenance burden.
-- **Evidence to attach:** `docs/DISCOVERY.md` items 1/2/5 (rollback, preflight, IPC — all
-  assume *some* process boundary exists), `docs/MIGRATION.md` item 5's note that IPC
-  validation logic is a evocore/evoapp split candidate (same shape of problem).
-- **Pre-work before calling architect:** a Sonnet `pattern-scout` pass on whether
-  zapret/winws (or a fork) supports a live control API, and what comparable DPI-bypass
-  tools (e.g. GoodbyeDPI, ByeDPI's own project) do for live reconfiguration, if anything.
-- **Blocks:** V1.1, and therefore V1.2-V1.4, V2.x, V3.x (everything downstream of capture).
+  1. WinDivert (known, LGPL, AV-flagged) — plan's standing recommendation for V1, since the
+     `PacketSource` trait lets a second implementation follow later.
+  2. TUN-based path — writing your own TCP/IP stack (weeks) but gives cleaner control for V7.
+- **Binding constraint on either option (rule 3b — not optional polish):** (a)
+  handle-lifecycle safety (RAII/`Drop`, panic, kill, process exit) proven by test — the old
+  engine's was never documented, a gap per docs/FORENSICS.md B2, not a clean record to
+  build on; (b) WinDivert version conflict with a co-installed zapret/winws is handled (a
+  real, previously-hit failure — net3/SOLUTION.md §4.2/§9). See P2 below — this needs its
+  own investigation before the brief is complete.
+- **Other binding constraints:** rule 5/11 (strategy change must not drop the connection
+  once V2.3 lands), `evorift-security-hygiene` (no silent privilege escalation, rollback
+  journal coverage), single-developer maintenance burden.
+- **Evidence to attach:** docs/FORENSICS.md B1-B6 in full (the removal-reason excavation),
+  `docs/DISCOVERY.md`/`docs/MIGRATION.md` items 1/2/5 (rollback, preflight, IPC).
+- **Pre-work before calling architect:** P2 (WinDivert version-conflict handling, below)
+  should be at least scoped, since it's now a binding constraint on the decision, not a
+  follow-up to it.
+- **Blocks:** nothing anymore — V1.1 and everything downstream is unblocked (see below);
+  K1 only needs to pick WinDivert vs. TUN before V1.1 locks in its implementation.
 
 ### K2 — V7.3 throttling technique
 
@@ -61,8 +62,8 @@ run on a Sonnet subagent first and get folded into the brief before calling arch
   Windows QoS policy — OS-native, less control, likely lower latency risk.
 - **Binding constraints:** V7.5's latency budget (accelerator's own added latency must stay
   under a threshold and self-disable if it doesn't), V7.3's "priority process never
-  throttled" rule, K1's eventual resolution (if capture stays external-process, does that
-  process see enough traffic to also handle throttling, or is this a separate mechanism entirely?).
+  throttled" rule, K1's WinDivert-vs-TUN outcome (does the chosen capture layer already see
+  enough traffic to also handle throttling, or is this a separate mechanism entirely?).
 - **Pre-work before calling architect:** none yet — this decision isn't urgent until V7
   is reached; revisit the brief once V1-V6 are further along and K1 is resolved (K1's
   outcome may change what's even available here).
@@ -130,16 +131,31 @@ run on a Sonnet subagent first and get folded into the brief before calling arch
 
 ## V1 — Capture and flow layer (L0-L2)
 
-> **V1.1 is BLOCKED on K1** (see DECISIONS above and QUESTIONS.md Q1). Don't start V1.1 as
-> literally described in BACKEND-V2-PLAN.md — it assumes in-process WinDivert capture,
-> which is rejected. Get the K1 brief filled in and taken to `architect` first.
+> **Unblocked 2026-08-12** (see DECISIONS above, QUESTIONS.md Q1, docs/FORENSICS.md B6).
+> V1.1 may proceed once K1 picks WinDivert vs. TUN; either way, rule 3b's two conditions
+> (handle-lifecycle proof, WinDivert version-conflict handling) are mandatory acceptance
+> criteria, not optional follow-ups.
 
-### V1.1 — `PacketSource` trait + capture implementation — **BLOCKED, needs K1 first**
-- **Crate:** `evosys` (or wherever K1 lands)
-- **Task:** placeholder — do not implement until K1 is resolved. Whatever K1 decides
-  (control-channel to an external process, or otherwise), rewrite this item's task/
-  acceptance criteria to match before starting.
-- **Skill/subagent:** `architect` for K1 first, then `feature-flow` for the resulting build.
+### V1.1 — `PacketSource` trait + WinDivert implementation
+- **Crate:** `evosys`
+- **Files:** new `evosys/src/capture/` module (or wherever K1's implementation choice lands).
+- **Task:** RAII-wrapped handle, closed on `Drop`. Filter expression starts narrow (only the
+  port/direction of interest) — a broad filter is forbidden, processing game traffic for
+  nothing wrecks ping. **Rule 3b acceptance criteria (mandatory, not optional):** (a) test
+  proves handle lifecycle is safe across normal drop, panic, `kill`, and process exit —
+  the old engine never documented this, don't repeat that gap; (b) test or documented
+  procedure proves WinDivert version conflict with a co-installed zapret/winws is detected
+  and handled, not silently broken (see P2 below for the investigation this needs first).
+- **Acceptance criteria:** the flow engine is testable with a fake source; no handle leaks;
+  both rule 3b criteria above pass.
+- **Verify:** `cargo test -p evosys`; `evorift-rust-tauri`'s FFI/unsafe rules apply directly
+  (every `unsafe` block needs a `// SAFETY:` comment).
+- **Skill/subagent:** `feature-flow`; `saboteur` pass specifically on handle lifecycle
+  (panic mid-capture, kill during a filter swap, process exit with packets in flight) before
+  commit — this is exactly the class of bug the old engine's undocumented lifecycle could
+  have hidden.
+- **Depends on:** K1 (WinDivert vs. TUN) should be picked first, though the RAII/`Drop`
+  structure and the fake-source testability don't otherwise depend on which is chosen.
 
 ### V1.2 — Flow table
 - **Crate:** `evocore`
@@ -149,8 +165,8 @@ run on a Sonnet subagent first and get folded into the brief before calling arch
 - **Verify:** `cargo test -p evocore` with a synthetic load test.
 - **Skill/subagent:** `feature-flow`; `saboteur` pass afterward (concurrent flows, boundary
   flow counts, mid-cleanup kill are exactly its remit).
-- **Depends on:** not blocked by K1 — flow-table logic is capture-source-agnostic if built
-  against a trait/mock source; can proceed once V0.1-V0.3 land, ahead of V1.1's resolution.
+- **Depends on:** nothing K1-related — flow-table logic is capture-source-agnostic if built
+  against a trait/mock source; can proceed once V0.1-V0.3 land, in parallel with V1.1.
 
 ### V1.3 — PID mapping
 - **Crate:** `evosys` (IP Helper tables are Windows-specific)
@@ -530,6 +546,33 @@ run on a Sonnet subagent first and get folded into the brief before calling arch
   client — flagged as a known risk in `docs/DISCOVERY.md` item 2), merge to main.
 - **Acceptance criteria:** CHANGELOG corrected, installer signed, SHA published, merged.
 - **Skill/subagent:** `feature-flow`; `git push` is the user's, per standing rule.
+
+---
+
+## P1/P2 — Open investigations (surfaced 2026-08-12, NOT solved here)
+
+### P1 — Two different causes claimed for the same Discord-desktop symptom
+
+`src-tauri/src/warp.rs`'s own doc-comment (`warp.rs:3-4`) says the Discord desktop client
+sticks on "Starting…" because it prefers QUIC and the ISP kills that with
+ICMP-unreachable, plus desync breaking the large JS packets it pulls. `net3/SOLUTION.md`
+§3.3 (docs/FORENSICS.md B6) says the client sticks on "Connecting…" because the ISP
+inspects and drops the gateway WebSocket's zstd-compressed `READY` payload — and lists
+"Block QUIC → force TCP" as a *failed* mitigation attempt, i.e. QUIC wasn't the cause
+found there. Both documents agree WARP split-tunnel is the fix; they don't agree on why
+it's needed. One of them is wrong, and the current architecture (and this session's rule 3
+rewrite) rests on `net3/SOLUTION.md`'s version. **Investigate before V6** (the tunnel
+phase this decision actually gates) — not blocking V0-V1.
+
+### P2 — WinDivert version-conflict handling when zapret/winws is co-installed
+
+Named as a real, previously-hit failure in `net3/SOLUTION.md` §4.2/§9 ("WinDivert version
+conflict... two apps shipping different versions makes the second fail" /
+"`winws` exits instantly... another bypass loaded a different WinDivert version") and now
+a binding condition on K1 (rule 3b) and an acceptance criterion on V1.1. Needs at least: how
+`net3`/`winws` currently detects and handles this (`net3/src/winws.rs` per the doc), and
+whether the same detection approach is available to a v2 in-process capture layer, or needs
+its own mechanism. **Feeds the K1 brief directly** — see the K1 pre-work note above.
 
 ---
 
