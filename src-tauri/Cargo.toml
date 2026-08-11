@@ -19,6 +19,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# P0-a (2026-08-13): force admin elevation via embedded manifest — see build.rs.
+# Same crate/version net3 used (net3/Cargo.toml, net3/SOLUTION.md line 213).
+embed-manifest = "1.4"
 
 [dependencies]
 # tray-icon: sistem tepsisi simgesi + menü (Faz 4.7). Crate'ler (tray-icon, muda) zaten Cargo.lock'ta.
