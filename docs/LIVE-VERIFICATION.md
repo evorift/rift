@@ -6,14 +6,18 @@ as "done" without an entry here. The user runs the actual commands; Claude prepa
 and interprets the result. Failed runs are recorded too — they're the most valuable data
 point there is.
 
-**Empty today.** No v2 code exists yet to verify (see `docs/STATUS.md`). The first entry
-should land once V0-V1 produce a strategy engine with observable behavior — not before.
+**Corrected 2026-08-14 — this line was stale.** It used to say "empty today, no v2 code
+exists yet" — still true for **v2** (V0 hasn't started), but this file now holds a real
+**v1** run below (the P0-a/b/c validation pass), which is exactly what it's for: this log
+isn't v2-exclusive, it's whatever gets live-verified, on whichever version. The next *v2*
+entry lands once V0-V1 produce a strategy engine with observable behavior; the run below
+is unrelated to that milestone.
 
 ## Run log
 
 | Date | Phase | ISP | Version | Baseline | Result | Live-tweak result | Pass/Fail | Notes |
 |---|---|---|---|---|---|---|---|---|
-| _(none yet)_ | | | | | | | | |
+| 2026-08-13 | P0-a/b/c validation (pre-V0, v1) | not recorded | 0.1.3 | Not cleanly established — see `docs/HYPOTHESES-INTERNET-CUT.md` "known unknowns" | **FAIL** — turning protection on cut ALL internet (not just target domains); Discord never opened | Not reached — run aborted at the outage | **FAIL** | Recovery only on closing the app (process-bound, no manual cleanup needed). Root cause not yet determined — see `docs/HYPOTHESES-INTERNET-CUT.md` for the ranked candidate list and `docs/DIAGNOSE-INTERNET-CUT.md`/`scripts/capture-state.ps1` for the capture procedure still to be run. |
 
 ## Prepared run: P0-a/b/c validation (2026-08-13, not yet executed)
 
