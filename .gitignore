@@ -26,7 +26,19 @@ TAURI_SIGNING_*
 updater-*.key
 
 # --- Yerel planlama dökümanları (private kalsın) ---
-docs/
+# NOT: `docs/*` kullan, salt `docs/` değil — git bir üst dizin tamamen dışlanmışsa
+# (`docs/`) içindeki `!` istisnalarını uygulamaz. `docs/*` her çocuğu ayrı ayrı dışlar,
+# bu yüzden aşağıdaki istisnalar gerçekten çalışır (doğrulandı: git check-ignore -v).
+docs/*
+# İstisna (2026-08-12): v2 planlama dosyaları artık tek makinede duran plan verisi,
+# log/çıktı değil — `git clean -fdx` hepsini geri dönüşsüz siler. Bu dördü + FORENSICS.md
+# izlenir; docs/ altındaki geri kalan (arşiv, BSOD analizi, ticari/gizlilik notları vb.)
+# private kalmaya devam eder.
+!docs/DISCOVERY.md
+!docs/MIGRATION.md
+!docs/STATUS.md
+!docs/LIVE-VERIFICATION.md
+!docs/FORENSICS.md
 
 # --- OS / editör ---
 Thumbs.db
