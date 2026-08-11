@@ -451,6 +451,52 @@ impl BypassEngine for SimEngine {
 // Kanıtlanmış catch-all zapret stratejisi: TÜM TCP/443 + QUIC + Discord ses (Türkcell CANLI 2026-06-08).
 // Bundle: evorift-svc.exe yanındaki `winws\` klasörü. Job Object: servis ölünce kernel winws'i öldürür.
 // ============================================================================
+/// Eski/yabancı WinDivert ÇEKİRDEK SÜRÜCÜSÜNÜ temizle. Windows tek global WinDivert.sys yükler;
+/// farklı sürüm yüklüyse winws anında ölür. Güvenli sıra: DURDUR → STOPPED doğrula → ANCAK O ZAMAN sil
+/// (çalışırken `sc delete` → DELETE_PENDING limbo'su, durum kötüleşir). Best-effort + sessiz.
+///
+/// Module-level and `pub` because the remote test agent (`testd::recovery`) fires the exact same
+/// cleanup from its deadman switch. One implementation, two callers — a second copy over there
+/// would drift from this one the moment a service name is added.
+#[cfg(windows)]
+pub fn clear_stale_windivert() {
+    use std::os::windows::process::CommandExt;
+    let sc = |args: &[&str]| -> String {
+        std::process::Command::new("sc")
+            .args(args)
+            .creation_flags(0x0800_0000)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    };
+    for name in ["WinDivert", "WinDivert1.4", "WinDivert1.1"] {
+        if !sc(&["query", name]).contains("STATE") {
+            continue;
+        }
+        // Best-effort: a stop that fails is still followed by the STOPPED poll below, which is
+        // what actually gates the delete — the stop's own exit code adds nothing.
+        let _ = sc(&["stop", name]);
+        let mut stopped = false;
+        for _ in 0..5 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let q = sc(&["query", name]);
+            if !q.contains("STATE") || q.contains("STOPPED") {
+                stopped = true;
+                break;
+            }
+        }
+        if stopped {
+            // Best-effort: if the delete fails the driver is at least STOPPED, which is enough for
+            // winws to load its own version; surfacing an error here has no recovery path.
+            let _ = sc(&["delete", name]);
+        }
+    }
+}
+
+/// Non-Windows stub — WinDivert is a Windows kernel driver; there is nothing to clear elsewhere.
+#[cfg(not(windows))]
+pub fn clear_stale_windivert() {}
+
 #[cfg(windows)]
 pub struct WinwsEngine {
     child: Option<std::process::Child>,
@@ -500,39 +546,6 @@ impl WinwsEngine {
     /// Kill all running winws.exe instances (single-instance + orphan cleanup; WinDivert conflict prevention).
     fn kill_all() {
         crate::proc::kill_image("winws.exe");
-    }
-
-    /// Eski/yabancı WinDivert ÇEKİRDEK SÜRÜCÜSÜNÜ temizle. Windows tek global WinDivert.sys yükler;
-    /// farklı sürüm yüklüyse winws anında ölür. Güvenli sıra: DURDUR → STOPPED doğrula → ANCAK O ZAMAN sil
-    /// (çalışırken `sc delete` → DELETE_PENDING limbo'su, durum kötüleşir). Best-effort + sessiz.
-    fn clear_stale_windivert() {
-        use std::os::windows::process::CommandExt;
-        let sc = |args: &[&str]| -> String {
-            std::process::Command::new("sc")
-                .args(args)
-                .creation_flags(0x0800_0000)
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default()
-        };
-        for name in ["WinDivert", "WinDivert1.4", "WinDivert1.1"] {
-            if !sc(&["query", name]).contains("STATE") {
-                continue;
-            }
-            let _ = sc(&["stop", name]);
-            let mut stopped = false;
-            for _ in 0..5 {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                let q = sc(&["query", name]);
-                if !q.contains("STATE") || q.contains("STOPPED") {
-                    stopped = true;
-                    break;
-                }
-            }
-            if stopped {
-                let _ = sc(&["delete", name]);
-            }
-        }
     }
 
     /// "Off" exclusion port'ları varsa winws WinDivert capture filter'ını yeniden derle → o uygulamaların
@@ -705,7 +718,7 @@ impl BypassEngine for WinwsEngine {
             return Ok(());
         }
         Self::kill_all();
-        Self::clear_stale_windivert();
+        clear_stale_windivert();
         let excl = self.excl.clone();
         let strat = strategy.clone();
         let hl = hostlist.to_vec();
@@ -720,7 +733,7 @@ impl BypassEngine for WinwsEngine {
         std::thread::sleep(std::time::Duration::from_millis(700));
         if matches!(child.try_wait(), Ok(Some(_))) {
             eprintln!("[evorift][winws] anında çıktı (WinDivert çakışması olası) — temizleyip yeniden deniyorum");
-            Self::clear_stale_windivert();
+            clear_stale_windivert();
             std::thread::sleep(std::time::Duration::from_millis(500));
             child = spawn().map_err(|e| format!("winws yeniden başlatılamadı: {e}"))?;
             self.assign_to_job(&child);

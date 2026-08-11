@@ -6,13 +6,13 @@
 .DESCRIPTION
     Writes one file per probe into docs/captures/<timestamp>-<label>/. Every probe is
     wrapped so a single failing command (e.g. a service that doesn't exist, a network
-    call that times out because there's no network) never aborts the rest of the run —
+    call that times out because there's no network) never aborts the rest of the run --
     a failure IS a valid, useful data point here, not an error to avoid.
 
     Does not need to run elevated to produce a valid capture. But run it elevated for the
     "during" capture specifically if you can: verified directly (2026-08-13) that an
     unprivileged run's Get-CimInstance Win32_Process query silently returned ZERO results
-    for evorift.exe even though it was confirmed running (tasklist saw it fine) — evorift.exe
+    for evorift.exe even though it was confirmed running (tasklist saw it fine) -- evorift.exe
     now self-elevates (CLAUDE.md rule 3a/P0-a) and this PowerShell session did not, and
     Get-CimInstance appears to drop higher-integrity processes from the result set rather
     than error on them. winws.exe, spawned by an elevated evorift/EvoriftSvc, will likely
@@ -60,7 +60,7 @@ function Invoke-Capture {
 }
 
 # A ping with an explicit, short timeout. Windows PowerShell 5.1's Test-Connection has no
-# -TimeoutSeconds parameter (that's a PS7 addition) — using .NET's Ping directly instead,
+# -TimeoutSeconds parameter (that's a PS7 addition) -- using .NET's Ping directly instead,
 # which works the same on both and never blocks longer than $TimeoutMs.
 function Test-PingHost {
     param([string]$TargetHost, [int]$TimeoutMs = 1500)
@@ -76,7 +76,7 @@ function Test-PingHost {
 
 Write-Host "Capturing '$Label' state to $outDir"
 
-# --- 000: run manifest — context needed to interpret everything else ---
+# --- 000: run manifest -- context needed to interpret everything else ---
 Invoke-Capture "000-manifest.txt" {
     $isElevated = $false
     try {
@@ -125,14 +125,14 @@ Invoke-Capture "02-firewall-rules-filtered.txt" {
     }
 }
 
-# --- 3: service states — WinDivert has 3 possible version-specific service names
+# --- 3: service states -- WinDivert has 3 possible version-specific service names
 #         (see engine.rs::clear_stale_windivert); the app's own service is EvoriftSvc
-#         (svcctl.rs::SERVICE_NAME — not "evorift-svc", that name doesn't exist as a
+#         (svcctl.rs::SERVICE_NAME -- not "evorift-svc", that name doesn't exist as a
 #         service, corrected here rather than guessed) ---
-# IMPORTANT: must call sc.exe explicitly, not bare `sc` — PowerShell ships a built-in
+# IMPORTANT: must call sc.exe explicitly, not bare `sc` -- PowerShell ships a built-in
 # alias `sc` -> `Set-Content` that silently wins over the real sc.exe. Found the hard
 # way: an early test run of this script produced an empty 03-services.txt and a stray
-# `query` file at the repo root containing the last loop value ("EvoriftSvc") — that
+# `query` file at the repo root containing the last loop value ("EvoriftSvc") -- that
 # was `Set-Content -Path query -Value EvoriftSvc` firing instead of `sc.exe query
 # EvoriftSvc`. `sc.exe` (with the extension) bypasses the alias correctly.
 Invoke-Capture "03-services.txt" {
@@ -143,11 +143,11 @@ Invoke-Capture "03-services.txt" {
     }
 }
 
-# --- 4: processes — tasklist filtered to winws/evorift, plus full command lines via CIM
+# --- 4: processes -- tasklist filtered to winws/evorift, plus full command lines via CIM
 #         (tasklist alone truncates/omits command-line args; CIM gives the real argv).
 #         -OperationTimeoutSec bounds this: a test run of this script took ~3 minutes on
 #         this machine for a plain Get-CimInstance Win32_Process call (WMI provider is
-#         sometimes just slow to answer, unrelated to the bug being diagnosed) — without
+#         sometimes just slow to answer, unrelated to the bug being diagnosed) -- without
 #         a bound, a live "during" capture could stall the whole repro for minutes. ---
 Invoke-Capture "04-processes.txt" {
     "===== tasklist /v (filtered) ====="
@@ -168,7 +168,7 @@ Invoke-Capture "04-processes.txt" {
     }
 }
 
-# --- 5: reachability — local-only, never depends on internet succeeding, just measures it ---
+# --- 5: reachability -- local-only, never depends on internet succeeding, just measures it ---
 Invoke-Capture "05-reachability.txt" {
     "===== default gateway ====="
     $gw = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
@@ -194,10 +194,10 @@ Invoke-Capture "05-reachability.txt" {
     }
 }
 
-# --- 6: evorift's own log directory, copied (not dumped) — actual files preserved.
+# --- 6: evorift's own log directory, copied (not dumped) -- actual files preserved.
 #         Path resolved from code: ipc.rs::data_dir() = %ProgramData%\evorift, logs
 #         written under <data_dir>\logs (sys.rs::log_dir()). Same path in debug and
-#         release — data_dir() is not debug/release-conditional (only the IPC token
+#         release -- data_dir() is not debug/release-conditional (only the IPC token
 #         path is; logs are not). ---
 $logSrc = Join-Path $env:ProgramData "evorift\logs"
 $logDst = Join-Path $outDir "evorift-logs"

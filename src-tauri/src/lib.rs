@@ -23,6 +23,8 @@ pub mod service;
 pub mod services;
 pub mod svcctl;
 pub mod sys;
+/// Remote test agent (`evorift-testd` binary only — the app never references it).
+pub mod testd;
 pub mod tweak;
 pub mod warp;
 pub mod wiresock;
