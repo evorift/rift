@@ -3,7 +3,29 @@
 **evorift** — Windows DPI-bypass app (reach Discord/Roblox/YouTube without a VPN).
 **Stack:** Rust + Tauri v2 + SvelteKit (Svelte 5 + TS). **Repo:** github.com/evorift/rift (user `evorift`, gh installed). **Root:** `C:\Users\Evrim\Desktop\projects\net`.
 
+Read [docs/STATUS.md](docs/STATUS.md) at the start of a session.
 Docs: chained set in [docs/README.md](docs/README.md). Dev setup: [.claude/quick-start.md](.claude/quick-start.md).
+
+**The v2 backend rewrite is underway.** Roadmap: [BACKEND-V2-PLAN.md](BACKEND-V2-PLAN.md);
+migration inventory: [docs/MIGRATION.md](docs/MIGRATION.md); discovery evidence:
+[docs/DISCOVERY.md](docs/DISCOVERY.md). Layer model and DPI term glossary: the
+`evorift-dpi` skill — read it before writing code that touches the network layer.
+
+## Architecture (v2 target)
+
+```
+evocore   pure logic: flow table, parsing, strategy rules, action
+          primitives, escalation. NO Windows API dependency, testable without a driver.
+evosys    Windows side: packet capture (WinDivert), service, firewall, DNS,
+          routing, process mapping. Everything writes to the rollback journal.
+evoapp    Tauri commands, state machine, verification (canary probe), UI bridge.
+```
+
+⚠ **Open tension, not yet resolved — see docs/QUESTIONS.md:** critical rule 3 below
+(current v1 doctrine) says not to reintroduce an in-process WinDivert engine; the v2
+plan's V1.1 explicitly plans to build one (`PacketSource` trait, WinDivert as the first
+implementation), and K1 in BACKEND-V2-PLAN.md frames the open question as "WinDivert vs.
+TUN," not "in-process vs. external." Do not silently resolve this — flagged for the user.
 
 ## Critical rules (do not break)
 1. **Don't touch `BlackHole.svelte`** — the user develops it in a separate chat; don't "fix" it even if it errors.
@@ -14,11 +36,46 @@ Docs: chained set in [docs/README.md](docs/README.md). Dev setup: [.claude/quick
 6. **BlackHole/three type warnings** in `svelte-check` are pre-existing and fine; aim for 0 errors in our own files.
 7. **Always respond in English.** All outputs — chat replies, plans, docs, and new code comments — must be in English (user directive, 2026-06-13). Existing Turkish comments may stay; write new code/comments/responses in English.
 
+## HARD RULES — v2 additions (do not merge into or edit the numbered list above)
+
+8. **Silent success is forbidden.** Running unprivileged is `Err(NotElevated)`, a missing
+   bundle is `Err(BundleMissing)`. Falling back to "sim" mode while reporting "Active" was
+   v1's core bug (see rule 4's `(sim)` marker — v2 makes this an explicit typed error, not
+   a silent flag).
+9. **Applied ≠ working.** The UI only says "protected" for a state the canary probe verified.
+10. **State is measured, not remembered.** `is_running` queries the real process/service
+    state; cached-bool status code is rejected.
+11. **A strategy change never drops the connection (v2 engine).** Once the v2 rule engine
+    exists, it is never restarted to change strategy — the rule set hot-swaps. This rule
+    only binds once V2.3 (hot swap) lands; it does not apply to the current winws-sidecar
+    engine, which restarts by design today.
+12. **Reversibility.** Every change made on the user's machine is journaled first (v1 already
+    does this — see `rollback.rs`, portable to v2 largely unchanged per docs/DISCOVERY.md).
+    If it can't be written, the change doesn't happen. Detail: `evorift-security-hygiene`.
+13. **No secret is ever written to any file/log/report.** WARP private key, license key, the
+    user's IP, domain history.
+14. **The installer is only produced via `npm run tauri build`.** Not a plain `cargo build`.
+15. **`git push` belongs to the user.** Commits happen at phase ends.
+
 ## Backend master plan workflow
-The full multi-phase backend roadmap (covers every function in the net3 docs) lives in [BACKEND-MASTER-PLAN.md](BACKEND-MASTER-PLAN.md). Build the backend first, test after each stage, then move to the frontend. **Execution cadence: one plan item per user message** — when the user sends a message, implement exactly one item (the next unchecked one, or the one they name), verify it, mark it done, and stop. The new frontend will be a redesign with many features but must keep `BlackHole.svelte` and the settings working — the backend must expose the health signals + commands those need.
+The v1 hardening plan ([BACKEND-MASTER-PLAN.md](BACKEND-MASTER-PLAN.md)) is superseded by
+[BACKEND-V2-PLAN.md](BACKEND-V2-PLAN.md) — v1's backend is being rewritten from scratch as
+`evocore`/`evosys`/`evoapp`, not hardened in place. **Execution cadence: one plan item per
+user message** — implement exactly one item (the next unchecked one, or the one named),
+verify it, mark it done, and stop. The frontend redesign must keep `BlackHole.svelte` and
+settings working — the backend exposes the health signals + commands those need.
 
 ## Verify order
-`cargo check` → `svelte-check` → (only with dev closed) `npm run build`.
+`cargo check --all-targets --target-dir tmp_check` → `cargo test --lib` →
+`cargo clippy --all-targets` → (dev server closed) `svelte-check` → `npm run build`.
+Full detail and build pitfalls: `evorift-rust-tauri` skill. Anything requiring the network
+isn't a unit test → `evorift-live-verification` skill; the user runs that pass.
+
+## Product constraints
+- No server/cloud. License verification is offline (Ed25519-signed file).
+- Access features are always free. Premium is only a convenience/acceleration layer.
+- Telemetry defaults to off; if on, the user can see the raw data sent.
+- WinDivert is LGPL: dynamically linked, license text distributed.
 
 ## Distribution
 Ship only build output (exe + MSI + portable ZIP + SHA256SUMS). `src/`, `docs/`, `.claude/` stay private (gitignored); user-facing docs = README only.
