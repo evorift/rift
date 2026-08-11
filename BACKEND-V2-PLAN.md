@@ -68,6 +68,12 @@ means the next 9 phases pay for it._
 
 ## V1 — Capture and flow layer (L0-L2)
 
+> ⚠ **V1.1 is BLOCKED — as written below it violates CLAUDE.md hard rule 3** (no
+> in-process WinDivert engine). Resolved 2026-08-11: rule 3 stays a hard ban; V1.1 needs
+> a redesign that gets live-tunable strategy control over an **external**-process capture
+> layer instead of an in-process one. See QUESTIONS.md Q1 and the K1 decision brief in
+> BACKLOG.md's DECISIONS section — this item is not ready to implement as-is.
+
 - [ ] **V1.1 `PacketSource` trait + WinDivert implementation.** RAII-wrapped
   handle, closed on `Drop`. Filter expression starts narrow (only the port/
   direction of interest); a broad filter is forbidden — processing game traffic
@@ -270,11 +276,19 @@ _No cloud, no server of our own — this is a design choice, not a constraint._
 
 ## Awaiting decision (goes to the `architect` subagent)
 
-- [?] **K1 — Capture layer.** Stick with WinDivert (known, LGPL, AV-flagged), or
-  move to a TUN-based path? TUN means writing your own TCP/IP stack (weeks) but
-  gives cleaner control for V7. **Recommendation: WinDivert for V1, thanks to
-  the `PacketSource` trait a second implementation can follow later.** Decision
-  made before V1.1.
+- [?] **K1 — Capture layer (REFRAMED 2026-08-11, see QUESTIONS.md Q1).** Original framing
+  below is superseded — it assumed in-process capture was already decided, which
+  contradicts CLAUDE.md hard rule 3 (kept as a hard ban). The real question: **how do you
+  get runtime-tunable strategy control over an external-process capture layer** (in the
+  spirit of the current `winws` sidecar), without in-process WinDivert? Candidate
+  directions to weigh in the brief: a persistent external process with a control
+  channel/IPC that accepts live rule updates (vs. today's restart-per-change model), a
+  different external tool that already exposes live reconfiguration, or something else.
+  Decision needed before V1.1 restarts. Original (rejected) framing, kept for context:
+  _"Stick with WinDivert (known, LGPL, AV-flagged), or move to a TUN-based path? TUN means
+  writing your own TCP/IP stack (weeks) but gives cleaner control for V7. Recommendation:
+  WinDivert for V1, thanks to the `PacketSource` trait a second implementation can follow
+  later."_ — this assumed in-process capture, which is now off the table.
 - [?] **K2 — V7.3 throttling technique.** WinDivert queuing, or Windows QoS
   policy? The former gives more control but carries latency risk. Decision
   before V7.3.

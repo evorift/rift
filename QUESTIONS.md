@@ -6,7 +6,28 @@ history has value.
 
 ## Open
 
-### Q1 — Hard rule 3 vs. the V1.1 plan item (raised end of Phase 2, 2026-08-11)
+(none currently — Q1 below was answered end of Phase 2)
+
+## Answered
+
+### Q1 — Hard rule 3 vs. the V1.1 plan item (raised end of Phase 2, answered same session, 2026-08-11)
+
+**Decision: keep rule 3 as a hard ban.** In-process WinDivert capture stays off-limits.
+V1.1 as currently written in BACKEND-V2-PLAN.md ("`PacketSource` trait + WinDivert
+implementation" = in-process capture) is **rejected** and needs to be redesigned to
+achieve live strategy control while keeping the capture layer external-process-based
+(consistent with the existing `winws`-sidecar approach). K1's framing ("WinDivert vs.
+TUN," which assumed in-process capture either way) is invalidated along with it — the
+real open question becomes: *how do you get runtime-tunable strategy on an external
+process* (e.g. a control channel/IPC to a long-lived external capture process that
+accepts live rule updates, vs. some other mechanism) — not which in-process driver to use.
+
+**Follow-through:** V1.1 is marked BLOCKED in BACKLOG.md pending an `architect` decision
+(see the K1 brief in BACKLOG.md's DECISIONS section, rewritten to reflect this). Original
+plan text in BACKEND-V2-PLAN.md is annotated in place, not rewritten — the actual
+technical redesign of V1.1 is architect/user work, not something invented here.
+
+<details><summary>Original question text (for context)</summary>
 
 `CLAUDE.md`'s existing critical rule 3 says: *"There is no in-process WinDivert engine
 anymore ... don't reintroduce one."* This was written for v1, after an earlier in-process
@@ -31,6 +52,4 @@ lands, not before)? This doesn't block any of the Phase 3-5 infrastructure work 
 carried forward into the K1 decision brief in BACKLOG.md's DECISIONS section — but it should
 be resolved before V1.1 actually starts, since it changes what V1.1 is allowed to build.
 
-## Answered
-
-(none yet)
+</details>
