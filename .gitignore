@@ -39,6 +39,10 @@ docs/*
 !docs/STATUS.md
 !docs/LIVE-VERIFICATION.md
 !docs/FORENSICS.md
+!docs/DIAGNOSE-INTERNET-CUT.md
+# docs/captures/ deliberately stays ignored (inherits docs/* above, no negation added):
+# it holds real network config, firewall rules, and process listings from this machine —
+# exactly the kind of local system detail that shouldn't leave the machine, let alone the repo.
 
 # --- OS / editör ---
 Thumbs.db
