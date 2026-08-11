@@ -958,12 +958,13 @@ dependencies = [
 
 [[package]]
 name = "evorift"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "getrandom 0.2.17",
  "interprocess",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",

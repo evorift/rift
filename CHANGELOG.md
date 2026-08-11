@@ -23,6 +23,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - _Nothing yet._
 
+## [0.1.2] - 2026-06-11
+
+### Added
+
+- **Genişleyen uygulama satırları.** Uygulamalar listesinde bir satıra tıklayınca
+  altında o uygulamanın domain listesi açılır. Domain ekleyip kaldırabilirsiniz.
+- **Merkezi versiyon sabiti** (`src/lib/version.ts`). Yeni sürüm çıkarırken
+  yalnız tek dosyayı değiştirmek yeterli — hardcoded versiyon stringi kalmaması
+  için refactoring yapıldı.
+- **Tarayıcı domain tespiti** (Chrome, Edge, Firefox, Brave, vb.): Chromium
+  tabanlı tarayıcılar kendi DoH'unu kullandığı için OS DNS cache'inde domain
+  görünmüyordu. Artık reverse-DNS (PTR) fallback'i ile domain'ler tespit
+  edilebilir.
+
+### Fixed
+
+- **Versiyon numarası güncellenmiyordu.** NavRail, Ayarlar, Günlük ve başlatma
+  log'unda `v0.1.0` sabit olarak yazıyordu; yeni sürüm kurulsa bile eski
+  versiyon gösteriliyordu. Merkezi `APP_VERSION` sabiti ile düzeltildi.
+- **Site listesi hata yutuyordu.** `syncHostlist()` servise gönderimdeki hataları
+  sessizce yutuyordu — kullanıcı domain eklediğini sanıyordu ama motor
+  güncellenmiyordu. Artık hata log'a yazılır.
+- **Chrome/tarayıcı domain tespiti çalışmıyordu.** Chromium tarayıcılar kendi
+  DoH'unu kullandığı için `Get-DnsClientCache` eşleşme bulamıyordu.
+
+## [0.1.0] — Bilinen Sorunlar / Known Issues
+
+> **⚠️ Cloudflare WARP resmi istemcisi (v2026.4 ve öncesi) ile çakışma**
+>
+> Sisteminizde **Cloudflare WARP** (Cloudflare One Client) resmi masaüstü
+> uygulaması kuruluysa, bu uygulama arka planda sürekli `tasklist /FO CSV`
+> komutu çalıştırarak yüzlerce zombi process biriktirebilir ve **CPU kullanımını
+> %100'e çıkarabilir**. Bu sorun evorift'in kendisinden kaynaklanmaz — Cloudflare
+> WARP istemcisinin bilinen bir hatasıdır.
+>
+> **evorift'in WARP modu** (uygulama içi "WARP" seçeneği) resmi Cloudflare WARP
+> istemcisini **kullanmaz**; kendi `wgcf` + WireGuard split-tunnel altyapısıyla
+> çalışır. İki yazılım birbirinden bağımsızdır, ancak aynı anda çalışmaları ağ
+> yığınında çakışmaya neden olabilir.
+>
+> **Çözüm:**
+> 1. Resmi Cloudflare WARP istemcisini kaldırın veya güncelleyin.
+> 2. Kaldırmak istemiyorsanız, PowerShell'de servisi devre dışı bırakın:
+>    ```powershell
+>    Set-Service -Name "CloudflareWARP" -StartupType Disabled
+>    Stop-Service -Name "CloudflareWARP" -Force
+>    ```
+> 3. evorift'in WARP modunu güvenle kullanmaya devam edebilirsiniz — evorift
+>    kendi WireGuard tünelini yönetir.
+
 ## [0.1.0] - 2026-06-08
 
 First public release. evorift unblocks Discord, Roblox, YouTube, and games on
@@ -87,5 +137,7 @@ evorift follows Semantic Versioning, interpreted for a DPI-bypass tool as:
 - **MAJOR** (`x.0.0`) — a breaking change to the UI ↔ service IPC protocol (or
   any other incompatible contract change).
 
-[Unreleased]: https://github.com/evorift/rift/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/evorift/rift/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/evorift/rift/compare/v0.1.0...v0.1.2
 [0.1.0]: https://github.com/evorift/rift/releases/tag/v0.1.0
+[0.1.0 Known Issues]: #010--bilinen-sorunlar--known-issues

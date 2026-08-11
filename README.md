@@ -100,6 +100,16 @@ seviyesinde çalışan anti-cheat sistemleri, WinDivert sürücüsü etkinken ha
 davranabilir. **Tavsiye:** anti-cheat korumalı bir oyunu açmadan önce korumayı
 kapat. Kapatma tek tıkla yapılır ve tüm değişiklikler geri alınabilir.
 
+**Cloudflare WARP resmi istemcisi kurulu — sorun olur mu?**
+evorift'in uygulama içi "WARP" modu, resmi Cloudflare WARP (Cloudflare One Client)
+masaüstü uygulamasından **tamamen bağımsızdır**. evorift kendi `wgcf` + WireGuard
+split-tunnel altyapısını kullanır; resmi istemciye ihtiyaç duymaz. Ancak resmi
+Cloudflare WARP istemcisinin bazı sürümlerinde (v2026.4 ve öncesi) bilinen bir
+hata, arka planda sürekli `tasklist` komutu çalıştırarak **CPU'yu %100'e
+çıkarabilir**. İki uygulama aynı anda çalışırsa ağ yığınında çakışma da
+yaşanabilir. **Tavsiye:** resmi Cloudflare WARP istemcisini kaldırın veya
+güncelleyin; evorift'in WARP modunu güvenle kullanmaya devam edebilirsiniz.
+
 **Antivirüsüm uyardı, güvenli mi?**
 evorift imzasızdır ve ağ paketlerine düşük seviyede dokunur; bu iki özellik
 birleşince bazı antivirüs programları yanlış alarm (false positive) verebilir.
@@ -173,6 +183,11 @@ speed, including Discord voice (UDP/QUIC).
 - **Privacy:** no telemetry, no account. **Anti-cheat note:** evorift does not inject
   into games (network packets only), but it is safest to turn protection off before
   launching kernel-anti-cheat titles (Vanguard / EAC / BattlEye). One click to toggle.
+- **Cloudflare WARP note:** evorift's in-app "WARP" mode uses its own `wgcf` +
+  WireGuard split-tunnel and does **not** depend on the official Cloudflare WARP
+  client. The official client (v2026.4 and earlier) has a known bug that spawns
+  hundreds of zombie `tasklist` processes, pushing CPU to 100%. If you have both
+  installed, uninstall or update the official Cloudflare WARP client.
 - **Languages:** Turkish · English · Spanish · Russian.
 - **Support:** [GitHub Sponsors](https://github.com/sponsors/evorift) / Ko-fi (optional).
 - **License:** app code is [MIT](LICENSE); WinDivert ships as a separate LGPLv3 DLL

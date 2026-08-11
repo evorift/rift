@@ -1,12 +1,13 @@
-//! "Off" modlu uygulamaların ÇALIŞAN PID'lerinin TCP+UDP source port'larını PowerShell ile tara →
+//! "Off" modlu uygulamaların ÇALIŞAN PID'lerinin TCP+UDP source port'larını NATIVE Win32 ile tara →
 //! engine.rs WinwsEngine bunları WinDivert capture filter'ında EXCLUDE eder → o uygulamanın paketleri
 //! winws'e ULAŞMAZ → gerçek "off" mod (DPI'dan tamamen hariç).
 //!
-//! Neden PowerShell? Get-Process + Get-NetTCPConnection + Get-NetUDPEndpoint yerleşik, ek bağımlılık
-//! YOK. ~5sn'lik tarama gecikmesi kabul edilebilir (yeni bağlantılarda kısa süreli geçici DPI
-//! uygulanabilir, sonra exclusion devreye girer). Tarama atomik: aynı snapshot'tan PID'ler + portlar.
-//!
-//! Güvenlik: exe yolları $env ile geçer (komut satırında DEĞİL → enjeksiyon yok, P7/A5 deseni).
+//! NEDEN PowerShell DEĞİL: Eski yol her ~5sn'de bir `powershell.exe` (+ `conhost.exe`) çağırıyordu →
+//! döngüde süreç yığılması + %100 CPU + AV malware sezgisi. Artık `netinfo` ile (GetExtendedTcpTable /
+//! GetExtendedUdpTable + QueryFullProcessImageNameW) süreç-İÇİNDE okunur → sıfır alt-süreç. Tarama
+//! atomik: tek soket snapshot'ı, sahip PID'lerin yolu çözülüp off listesiyle eşleştirilir.
+
+use crate::netinfo;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ExclusionPorts {
@@ -20,94 +21,52 @@ impl ExclusionPorts {
     }
 }
 
-/// Verilen exe yolları için çalışan PID'lerin TCP+UDP source port'larını topla.
-/// Yollar yokSayılır (boş, kayıp). Bulamazsa boş döner — engine eski yola düşer.
-#[cfg(windows)]
+/// Verilen exe yolları için çalışan PID'lerin TCP+UDP source port'larını topla (native, alt-süreç YOK).
+/// Yollar yokSayılır (boş, kayıp). Bulamazsa boş döner — engine eski catch-all yola düşer.
 pub fn scan(off_paths: &[String]) -> ExclusionPorts {
-    let paths: Vec<&str> = off_paths.iter().filter(|p| !p.is_empty()).map(|s| s.as_str()).collect();
-    if paths.is_empty() {
-        return ExclusionPorts::default();
-    }
-    // Yolları | ile birleştir → ENV ile PowerShell'e tek string olarak ver → script -split '\|' ile aç.
-    // (Komut satırı argv'sinde DEĞİL → boşluklu/Türkçe yollar bozulmaz, enjeksiyon yok.)
-    let joined = paths.join("|");
-
-    // STATİK script. $env değişkeni list edilen exe yollarını taşır. Çıktı: JSON {tcp:[..], udp:[..]}.
-    // - Get-Process: tüm süreçler, path'i off listede olanları filtrele.
-    // - Get-NetTCPConnection: TCP soketleri PID'e göre eşle → LocalPort.
-    // - Get-NetUDPEndpoint: UDP soketleri PID'e göre eşle → LocalPort.
-    let script = r#"$ErrorActionPreference='SilentlyContinue'
-$wanted = ($env:EVORIFT_OFF_PATHS -split '\|') | Where-Object { $_ }
-if ($wanted.Count -eq 0) { '{"tcp":[],"udp":[]}'; return }
-$lookup = @{}
-foreach ($w in $wanted) { $lookup[$w.ToLower()] = $true }
-$pids = @()
-foreach ($p in (Get-Process)) {
-  try { if ($p.Path -and $lookup[$p.Path.ToLower()]) { $pids += $p.Id } } catch {}
-}
-$pids = $pids | Sort-Object -Unique
-if ($pids.Count -eq 0) { '{"tcp":[],"udp":[]}'; return }
-$tcp = @(Get-NetTCPConnection | Where-Object { $pids -contains $_.OwningProcess } | Select-Object -ExpandProperty LocalPort -Unique)
-$udp = @(Get-NetUDPEndpoint | Where-Object { $pids -contains $_.OwningProcess } | Select-Object -ExpandProperty LocalPort -Unique)
-@{tcp=$tcp; udp=$udp} | ConvertTo-Json -Compress"#;
-
-    use std::os::windows::process::CommandExt;
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", script])
-        .env("EVORIFT_OFF_PATHS", joined)
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW (sessiz tarama)
-        .output();
-    let Ok(o) = out else { return ExclusionPorts::default() };
-    let s = String::from_utf8_lossy(&o.stdout);
-    let s = s.trim_start_matches('\u{feff}').trim();
-    if s.is_empty() {
+    // off yolları küçük harf seti → büyük/küçük harf duyarsız eşleştirme (Windows yolları case-insensitive).
+    let wanted: std::collections::HashSet<String> = off_paths
+        .iter()
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_lowercase())
+        .collect();
+    if wanted.is_empty() {
         return ExclusionPorts::default();
     }
 
-    // JSON çöz. PowerShell tek elemanı sayı olarak, çoğul'u dizi olarak verir → ikisini de kabul et.
-    #[derive(serde::Deserialize)]
-    struct Raw {
-        #[serde(default)]
-        tcp: serde_json::Value,
-        #[serde(default)]
-        udp: serde_json::Value,
+    let socks = netinfo::sockets();
+    if socks.is_empty() {
+        return ExclusionPorts::default();
     }
-    fn extract(v: &serde_json::Value) -> Vec<u16> {
-        let mut out = Vec::new();
-        match v {
-            serde_json::Value::Array(arr) => {
-                for x in arr {
-                    if let Some(n) = x.as_u64() {
-                        if n > 0 && n <= u16::MAX as u64 {
-                            out.push(n as u16);
-                        }
-                    }
-                }
-            }
-            serde_json::Value::Number(n) => {
-                if let Some(v) = n.as_u64() {
-                    if v > 0 && v <= u16::MAX as u64 {
-                        out.push(v as u16);
-                    }
-                }
-            }
-            _ => {}
+
+    // 1) Yalnız soket SAHİBİ PID'lerin yolunu çöz (tüm süreçleri taramaktan kaçın) → off listede mi bak.
+    //    PID → "off mu" haritası (yol bir kez çözülür; aynı PID'in çok soketi için tekrar OpenProcess yok).
+    let mut pid_is_off: std::collections::HashMap<u32, bool> = std::collections::HashMap::new();
+    for pid in netinfo::socket_pids(&socks) {
+        let is_off = netinfo::pid_exe_path(pid)
+            .map(|p| wanted.contains(&p.to_lowercase()))
+            .unwrap_or(false);
+        pid_is_off.insert(pid, is_off);
+    }
+
+    // 2) Off PID'lerinin TCP/UDP yerel (source) port'larını topla.
+    let mut tcp: Vec<u16> = Vec::new();
+    let mut udp: Vec<u16> = Vec::new();
+    for s in &socks {
+        if s.local_port == 0 {
+            continue;
         }
-        out.sort_unstable();
-        out.dedup();
-        out
+        if pid_is_off.get(&s.pid).copied().unwrap_or(false) {
+            if s.tcp {
+                tcp.push(s.local_port);
+            } else {
+                udp.push(s.local_port);
+            }
+        }
     }
-    let raw: Raw = match serde_json::from_str(s) {
-        Ok(r) => r,
-        Err(_) => return ExclusionPorts::default(),
-    };
-    ExclusionPorts {
-        tcp: extract(&raw.tcp),
-        udp: extract(&raw.udp),
-    }
-}
-
-#[cfg(not(windows))]
-pub fn scan(_off_paths: &[String]) -> ExclusionPorts {
-    ExclusionPorts::default()
+    tcp.sort_unstable();
+    tcp.dedup();
+    udp.sort_unstable();
+    udp.dedup();
+    ExclusionPorts { tcp, udp }
 }

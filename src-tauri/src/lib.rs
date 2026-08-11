@@ -1,12 +1,34 @@
+pub mod autopilot;
+pub mod byedpi;
 pub mod client;
+pub mod dns;
+pub mod drover;
 pub mod engine;
+pub mod firewall;
+pub mod goodbyedpi;
 pub mod ipc;
+pub mod limit;
+pub mod logbundle;
+pub mod manifest;
+pub mod netinfo;
 pub mod pid_scan;
+pub mod preflight;
+pub mod proc;
+pub mod profile;
+pub mod proxifyre;
+pub mod repair;
+pub mod rollback;
+pub mod schtask;
 pub mod service;
+pub mod services;
+pub mod svcctl;
+pub mod sys;
+pub mod tweak;
 pub mod warp;
+pub mod wiresock;
 
 use ipc::{Command, EngineStatus, Response};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, WindowEvent};
@@ -132,82 +154,130 @@ struct DetectedApp {
     kind: String,
 }
 
-/// PowerShell çıktısındaki ham satır.
-#[derive(Deserialize)]
-struct PsProc {
-    proc: Option<String>,
-    desc: Option<String>,
-    company: Option<String>,
-    exe: Option<String>,
-    path: Option<String>,
-}
-
-/// Ağ kullanan çalışan uygulamaları listele (aktif TCP / dinleyen UDP sahibi PID'ler → exe yolu + ad).
-/// Yetkisiz salt-okuma; yükseltilmiş süreçlerin yolu alınamazsa zarifçe atlanır. Mock listenin yerine.
+/// Ağ kullanan çalışan uygulamaları listele (aktif TCP / UDP soketi sahibi PID'ler → exe yolu + ad).
+/// NATIVE (alt-süreç YOK): netinfo soketleri → benzersiz PID'ler → pid_exe_path; ad exe dosya adından
+/// türetilir. Yetkisiz salt-okuma; yolu alınamayan PID'ler (System/korumalı) zarifçe atlanır.
 #[tauri::command]
 async fn list_apps() -> Vec<DetectedApp> {
-    // UI komut thread'ini bloke etmemek için PowerShell taramasını ayrı thread'de çalıştır (review LOW-7).
+    // UI komut thread'ini bloke etmemek için native taramayı ayrı thread'de çalıştır (review LOW-7).
     tauri::async_runtime::spawn_blocking(list_apps_blocking)
         .await
         .unwrap_or_default()
 }
 
 fn list_apps_blocking() -> Vec<DetectedApp> {
-    let script = r#"$ErrorActionPreference='SilentlyContinue'
-$pids=@()
-$pids+=(Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object {$_.State -eq 'Established' -or $_.State -eq 'Listen'}).OwningProcess
-$pids+=(Get-NetUDPEndpoint -ErrorAction SilentlyContinue).OwningProcess
-$pids=$pids | Where-Object {$_ -gt 4} | Sort-Object -Unique
-$rows=foreach($procId in $pids){ $p=Get-Process -Id $procId -ErrorAction SilentlyContinue; if($p -and $p.Path){ [PSCustomObject]@{proc=$p.ProcessName;desc=$p.Description;company=$p.Company;exe=(Split-Path $p.Path -Leaf);path=$p.Path} } }
-@($rows | Sort-Object exe -Unique) | ConvertTo-Json -Compress -Depth 3"#;
-    let out = hidden_command("powershell")
-        .args(["-NoProfile", "-Command", script])
-        .output();
-    let mut apps = Vec::new();
-    if let Ok(o) = out {
-        let s = String::from_utf8_lossy(&o.stdout);
-        // PowerShell 5.1 çıktısı baştan UTF-8 BOM taşıyabilir → serde'den önce sıyır (review LOW-8).
-        let s = s.trim_start_matches('\u{feff}').trim();
-        if !s.is_empty() && s != "null" {
-            // ConvertTo-Json tek satırda nesne, çoklu satırda dizi döndürür → ikisini de dene
-            let vals: Vec<PsProc> = serde_json::from_str::<Vec<PsProc>>(s)
-                .or_else(|_| serde_json::from_str::<PsProc>(s).map(|x| vec![x]))
-                .unwrap_or_default();
-            for v in vals {
-                let exe = v.exe.unwrap_or_default();
-                if exe.is_empty() {
-                    continue;
-                }
-                // id, QoS politika adı + netsh kural adı olarak kullanılır → güvenli slug'a indirge
-                // (boşluk/Türkçe/sembol → '-'); gerçek eşleştirme `path` ile yapıldığından ad serbest.
-                let id = exe
-                    .to_lowercase()
-                    .trim_end_matches(".exe")
-                    .chars()
-                    .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
-                    .collect::<String>();
-                let name = v
-                    .desc
-                    .filter(|d| !d.trim().is_empty())
-                    .or(v.proc)
-                    .unwrap_or_else(|| exe.clone());
-                apps.push(DetectedApp {
-                    id,
-                    name,
-                    exe,
-                    path: v.path.unwrap_or_default(),
-                    kind: v.company.unwrap_or_default(),
-                });
-            }
+    let socks = netinfo::sockets();
+    let mut apps: Vec<DetectedApp> = Vec::new();
+    let mut seen_exe: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for pid in netinfo::socket_pids(&socks) {
+        let Some(path) = netinfo::pid_exe_path(pid) else {
+            continue; // yolu alınamadı (System/korumalı/yarış) → atla
+        };
+        // exe = yolun son bileşeni (dosya adı)
+        let exe = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if exe.is_empty() {
+            continue;
         }
+        // exe'ye göre tekilleştir (aynı uygulamanın çok PID'i tek satır olsun)
+        let exe_lower = exe.to_lowercase();
+        if !seen_exe.insert(exe_lower.clone()) {
+            continue;
+        }
+        // id, QoS politika adı + netsh kural adı olarak kullanılır → güvenli slug'a indirge
+        // (boşluk/Türkçe/sembol → '-'); gerçek eşleştirme `path` ile yapıldığından ad serbest.
+        let id = exe_lower
+            .trim_end_matches(".exe")
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+            .collect::<String>();
+        // Görünen ad: exe dosya adından ".exe" sıyrılmış hali (örn "Discord.exe" → "Discord"). Eski
+        // PowerShell yolu $p.Description okuyordu; native API'de ucuz/güvenilir değil → exe adı yeterli
+        // (UI zaten ikon + kullanıcı tercihi gösterir; çekirdek uygulamalar varsayılan listeden adlanır).
+        let name = exe.trim_end_matches(".exe").trim_end_matches(".EXE").to_string();
+        let name = if name.is_empty() { exe.clone() } else { name };
+        apps.push(DetectedApp {
+            id,
+            name,
+            exe,
+            path,
+            kind: String::new(),
+        });
     }
     apps
 }
 
+/// Uygulama exe'lerinden ikon çıkar (32×32 PNG, base64). Tek PowerShell çağrısında toplu işler.
+/// Frontend açılışta çağırır → AppRow.icon alanına yazar → harf yerine gerçek ikon gösterilir.
+#[tauri::command]
+async fn get_app_icons(paths: Vec<String>) -> std::collections::HashMap<String, String> {
+    tauri::async_runtime::spawn_blocking(move || get_app_icons_blocking(&paths))
+        .await
+        .unwrap_or_default()
+}
+
+fn get_app_icons_blocking(paths: &[String]) -> std::collections::HashMap<String, String> {
+    if paths.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    // PowerShell'e yolları | ile ayırarak gönder; her biri için 32×32 PNG base64 döndür.
+    let script = r#"Add-Type -AssemblyName System.Drawing
+$paths = $env:EVORIFT_ICON_PATHS -split '\|'
+$result = @{}
+foreach($p in $paths){
+  if($p -and (Test-Path $p -PathType Leaf)){
+    try {
+      $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($p)
+      if($icon){
+        $bmp = $icon.ToBitmap()
+        $thumb = New-Object System.Drawing.Bitmap(32, 32)
+        $g = [System.Drawing.Graphics]::FromImage($thumb)
+        $g.InterpolationMode = 'HighQualityBicubic'
+        $g.DrawImage($bmp, 0, 0, 32, 32)
+        $g.Dispose()
+        $ms = New-Object System.IO.MemoryStream
+        $thumb.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+        $result[$p] = [Convert]::ToBase64String($ms.ToArray())
+        $ms.Dispose(); $thumb.Dispose(); $bmp.Dispose(); $icon.Dispose()
+      }
+    } catch {}
+  }
+}
+$result | ConvertTo-Json -Compress -Depth 2"#;
+
+    let paths_str = paths.join("|");
+    let out = hidden_command("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .env("EVORIFT_ICON_PATHS", &paths_str)
+        .output();
+
+    let mut map = std::collections::HashMap::new();
+    if let Ok(o) = out {
+        let s = String::from_utf8_lossy(&o.stdout);
+        let s = s.trim_start_matches('\u{feff}').trim();
+        if !s.is_empty() && s != "null" {
+            if let Ok(parsed) = serde_json::from_str::<std::collections::HashMap<String, String>>(s) {
+                map = parsed;
+            }
+        }
+    }
+    map
+}
+
 /// Bir uygulamanın ULAŞTIĞI domain'leri tespit et (Apps → otomatik bypass).
-/// Yöntem (yetkisiz, salt-okuma): exe'nin çalışan PID'lerinin kurulu (Established) TCP uzak IP'lerini al →
-/// DNS istemci önbelleğiyle (Get-DnsClientCache: hostname→IP) eşleştir → hostname listesi.
-/// exe ENV ile geçer (komut satırına interpolasyon YOK → enjeksiyon yüzeyi yok, P7/A5 deseni).
+///
+/// NATIVE (alt-süreç YOK): exe'nin çalışan PID'lerinin kurulu (Established) TCP uzak IP'lerini netinfo
+/// ile al → IP'leri önbellekli ters-DNS (GetNameInfoW) ile en-iyi-çaba hostname'e çevir.
+///
+/// ÖNEMLİ GERÇEK (V0.1.3 plan §b.5/b.6): tarayıcılar kendi DoH stub resolver'larını kullanır → domain'leri
+/// OS DNS önbelleğine HİÇ girmez; ters-DNS de CDN-arkası servisler (Discord/YouTube/Roblox = Cloudflare/
+/// Google) için kullanışsız `*.1e100.net` PTR'leri döndürür. Bu yüzden bu yol BEST-EFFORT'tur ve sık sık
+/// boş döner — gerçek bypass sabit hostlist + IP-aralığı eşleştirmesiyle yapılır (winws/WARP). Eski
+/// PowerShell yolu (Get-DnsClientCache + Resolve-DnsName, uygulama başına bir process) KALDIRILDI →
+/// süreç-yığılması/CPU bug'ının birincil kaynağıydı.
 #[tauri::command]
 async fn detect_app_domains(exe: String) -> Vec<String> {
     tauri::async_runtime::spawn_blocking(move || detect_domains_blocking(&exe))
@@ -216,95 +286,86 @@ async fn detect_app_domains(exe: String) -> Vec<String> {
 }
 
 fn detect_domains_blocking(exe: &str) -> Vec<String> {
-    if exe.trim().is_empty() {
+    let exe = exe.trim().to_lowercase();
+    if exe.is_empty() {
         return Vec::new();
     }
-    // Statik script; exe yalnız $env:EVORIFT_DETECT_EXE ile gelir (interpolasyon yok).
-    let script = r#"$ErrorActionPreference='SilentlyContinue'
-$name = ($env:EVORIFT_DETECT_EXE -replace '\.exe$','')
-$set=@{}
-if($name){
-  $procIds = @(Get-Process -Name $name | Select-Object -ExpandProperty Id)
-  if($procIds.Count -gt 0){
-    $ips = @(Get-NetTCPConnection -OwningProcess $procIds -State Established | Select-Object -ExpandProperty RemoteAddress -Unique) |
-      Where-Object { $_ -and $_ -notmatch '^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|0\.0\.0\.0|::1$|fe80|ff)' }
-    if($ips.Count -gt 0){
-      $cache = Get-DnsClientCache | Where-Object { $_.Data }
-      foreach($ip in $ips){ foreach($e in ($cache | Where-Object { $_.Data -eq $ip })){ if($e.Entry){ $set[$e.Entry.ToLower().TrimEnd('.')]=$true } } }
+
+    // 1) exe adı eşleşen çalışan PID'leri bul (native; OpenProcess yolun son bileşeni ile eşleştir).
+    let socks = netinfo::sockets();
+    let mut target_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for pid in netinfo::socket_pids(&socks) {
+        if let Some(path) = netinfo::pid_exe_path(pid) {
+            let base = std::path::Path::new(&path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if base == exe {
+                target_pids.insert(pid);
+            }
+        }
     }
-  }
-}
-@($set.Keys) | ConvertTo-Json -Compress"#;
-    let out = hidden_command("powershell")
-        .args(["-NoProfile", "-Command", script])
-        .env("EVORIFT_DETECT_EXE", exe)
-        .output();
+    if target_pids.is_empty() {
+        return Vec::new();
+    }
+
+    // 2) O PID'lerin kurulu TCP uzak IP'lerini topla (public IP'ler; özel/loopback/link-local atla).
+    let mut ips: Vec<std::net::IpAddr> = Vec::new();
+    for s in &socks {
+        if !s.tcp || !target_pids.contains(&s.pid) {
+            continue;
+        }
+        if let Some(ip) = s.remote {
+            if is_public_ip(&ip) && !ips.contains(&ip) {
+                ips.push(ip);
+            }
+        }
+    }
+    if ips.is_empty() {
+        return Vec::new();
+    }
+
+    // 3) En-iyi-çaba ters-DNS (önbellekli, ilk birkaç IP). CDN PTR'leri çoğu kez kullanışsız → boş kalabilir.
     let mut domains = Vec::new();
-    if let Ok(o) = out {
-        let s = String::from_utf8_lossy(&o.stdout);
-        let s = s.trim_start_matches('\u{feff}').trim();
-        if !s.is_empty() && s != "null" {
-            // tek hostname → string; çoklu → dizi
-            let vals: Vec<String> = serde_json::from_str::<Vec<String>>(s)
-                .or_else(|_| serde_json::from_str::<String>(s).map(|x| vec![x]))
-                .unwrap_or_default();
-            for d in vals {
-                let d = d.trim().to_lowercase();
-                // alan-adı sağlık kontrolü (ipc::validate hostlist beyaz-listesiyle uyumlu: [a-z0-9.-], nokta var)
-                if !d.is_empty()
-                    && d.len() <= 253
-                    && d.contains('.')
-                    && d.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
-                    && !domains.contains(&d)
-                {
-                    domains.push(d);
-                }
+    for ip in ips.iter().take(6) {
+        if let Some(host) = netinfo::reverse_dns(ip) {
+            let d = host.trim().trim_end_matches('.').to_lowercase();
+            if is_valid_domain(&d) && !domains.contains(&d) {
+                domains.push(d);
             }
         }
     }
     domains
 }
 
-// ============================================================================
-// Anti-cheat watcher (Faz 3.6) — opsiyonel güvenlik ağı.
-// Korumalı oyun (Vanguard/EAC/BattlEye) çalışırken DPI müdahalesi anti-cheat
-// tarafından şüpheli görülebilir. Watcher süreçleri ~5 sn'de bir tarar ve durum
-// değişince "anticheat" Tauri event'i yayınlar. EYLEM (korumayı duraklat/sürdür)
-// kararını frontend verir (kullanıcının "Anti-cheat koruması" toggle'ına göre);
-// böylece toggle kapalıyken sadece bilgilendirme yapılır, otomatik müdahale olmaz.
-// ============================================================================
-
-#[derive(Serialize, Clone)]
-struct AntiCheat {
-    active: bool,
-    name: String,
+/// Genel (public) IP mi? Özel/loopback/link-local/belirsiz aralıkları ele (otomatik bypass'a girmesin).
+fn is_public_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.octets()[0] == 0)
+        }
+        std::net::IpAddr::V6(v6) => {
+            !(v6.is_loopback() || v6.is_unspecified() || v6.is_multicast()
+                // fe80::/10 link-local + fc00::/7 unique-local (is_unique_local stabil değil → bit testi)
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || (v6.segments()[0] & 0xfe00) == 0xfc00)
+        }
+    }
 }
 
-/// Bilinen anti-cheat süreç adları (küçük harf) → kullanıcıya gösterilecek ad.
-const ANTICHEAT_PROCS: &[(&str, &str)] = &[
-    ("vgc.exe", "Riot Vanguard"),
-    ("vgtray.exe", "Riot Vanguard"),
-    ("vgk.sys", "Riot Vanguard"),
-    ("easyanticheat.exe", "Easy Anti-Cheat"),
-    ("easyanticheat_eos.exe", "Easy Anti-Cheat"),
-    ("beservice.exe", "BattlEye"),
-    ("beservice_x64.exe", "BattlEye"),
-    ("bedaisy.sys", "BattlEye"),
-    ("faceitservice.exe", "FACEIT AC"),
-    ("faceit.exe", "FACEIT AC"),
-];
-
-/// Çalışan süreçleri tara; bir anti-cheat tespit edilirse dostça adını döndür.
-fn detect_anticheat() -> Option<String> {
-    let out = hidden_command("tasklist")
-        .args(["/fo", "csv", "/nh"])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).to_lowercase();
-    ANTICHEAT_PROCS
-        .iter()
-        .find(|(proc_name, _)| s.contains(proc_name))
-        .map(|(_, friendly)| friendly.to_string())
+/// Alan-adı sağlık kontrolü (ipc::validate hostlist beyaz-listesiyle uyumlu: [a-z0-9.-], nokta var).
+fn is_valid_domain(d: &str) -> bool {
+    !d.is_empty()
+        && d.len() <= 253
+        && d.contains('.')
+        && d.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
 }
 
 // UI Tauri komutları → ayrıcalıklı servise pipe IPC ile proxy (docs/05 §1-2).
@@ -341,7 +402,13 @@ async fn protection_status() -> EngineStatus {
 async fn start_protection() -> EngineStatus {
     status_cmd(
         Command::Start,
-        EngineStatus { running: true, strategy: "auto".into(), dns: "cloudflare".into() },
+        EngineStatus {
+            running: true,
+            strategy: "auto".into(),
+            dns: "cloudflare".into(),
+            engine: "zapret".into(),
+            state: "active".into(),
+        },
     )
     .await
 }
@@ -400,6 +467,293 @@ async fn set_hostlist(domains: Vec<String>) -> Result<(), String> {
 #[tauri::command]
 async fn set_app_modes(modes: Vec<(String, String, String)>) -> Result<(), String> {
     unit_cmd(Command::SetAppModes { modes }).await
+}
+
+/// Tam Koruma: tüm sistem trafiğini WARP full-tunnel'dan geçir (per-app warp DEĞİL · standart WARP).
+/// `enable=false` → uygulama-başı moda geri dön. Frontend applyFullProtection/exitFullProtection çağırır.
+#[tauri::command]
+async fn set_full_warp(enable: bool) -> Result<(), String> {
+    unit_cmd(Command::SetFullWarp { enable }).await
+}
+
+// ===========================================================================
+// Blueprint genişletmesi (docs/07) — profil / motor / preflight / teşhis / auto-pilot / rollback.
+// Sorgu sonuçları JSON string olarak döner (frontend parse eder).
+// ===========================================================================
+
+/// Yapılandırılmış sorgu komutunu thread havuzunda çalıştırıp `Data` JSON string'ini döndür.
+async fn data_cmd(cmd: Command) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || client::command_data(cmd))
+        .await
+        .map_err(|e| format!("görev hatası: {e}"))?
+}
+
+/// Bilinen DPI motorlarının kataloğu + kullanılabilirlik (UI motor seçici). → JSON Vec<EngineInfo>.
+#[tauri::command]
+async fn engine_catalog() -> Result<String, String> {
+    data_cmd(Command::EngineCatalog).await
+}
+
+/// Aktif DPI motorunu değiştir ("zapret"|"byedpi"|"goodbyedpi"). Çalışıyorsa yeniden başlatır.
+#[tauri::command]
+async fn set_engine(id: String) -> Result<EngineStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || client::command_status(Command::SetEngine { id }))
+        .await
+        .map_err(|e| format!("görev hatası: {e}"))?
+}
+
+/// Tüm profilleri listele. → JSON Vec<Profile>.
+#[tauri::command]
+async fn list_profiles() -> Result<String, String> {
+    data_cmd(Command::ListProfiles).await
+}
+
+/// Profili kaydet / içe aktar (JSON gövdesi servis tarafında doğrulanır).
+#[tauri::command]
+async fn save_profile(json: String) -> Result<(), String> {
+    unit_cmd(Command::SaveProfile { json }).await
+}
+
+/// Profili sil.
+#[tauri::command]
+async fn delete_profile(id: String) -> Result<(), String> {
+    unit_cmd(Command::DeleteProfile { id }).await
+}
+
+/// Profili dışa aktar (paylaşılabilir JSON). → JSON Profile.
+#[tauri::command]
+async fn export_profile(id: String) -> Result<String, String> {
+    data_cmd(Command::ExportProfile { id }).await
+}
+
+/// Profili uygula: motoru/stratejiyi/hostlist'i/DNS'i ayarla + başlat (durum makinesi).
+#[tauri::command]
+async fn apply_profile(id: String) -> Result<EngineStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || client::command_status(Command::ApplyProfile { id }))
+        .await
+        .map_err(|e| format!("görev hatası: {e}"))?
+}
+
+/// DNS'i DHCP'ye sıfırla + DoH temizle.
+#[tauri::command]
+async fn reset_dns() -> Result<(), String> {
+    unit_cmd(Command::ResetDns).await
+}
+
+/// DNS doğrula (aktif sunucular + güvenli mi). → JSON DnsVerify.
+#[tauri::command]
+async fn verify_dns() -> Result<String, String> {
+    data_cmd(Command::VerifyDns).await
+}
+
+/// Ön-uçuş kontrolleri (admin/winws/çakışma/WARP/DoH). → JSON PreflightResult.
+#[tauri::command]
+async fn preflight() -> Result<String, String> {
+    data_cmd(Command::Preflight).await
+}
+
+/// Hedef site teşhisi (DNS/TCP/gecikme). → JSON Vec<TargetDiag>.
+#[tauri::command]
+async fn diagnose(targets: Vec<String>) -> Result<String, String> {
+    data_cmd(Command::Diagnose { targets }).await
+}
+
+/// Auto-Pilot: hedefleri her aday motorla test et, skor tablosu döndür. → JSON Vec<ScoreRow>.
+#[tauri::command]
+async fn autopilot(targets: Vec<String>, depth: String) -> Result<String, String> {
+    data_cmd(Command::AutoPilot { targets, depth }).await
+}
+
+/// Yapılan tüm sistem değişikliklerini ters sırada geri al (transaction log).
+#[tauri::command]
+async fn rollback_all() -> Result<(), String> {
+    unit_cmd(Command::RollbackAll).await
+}
+
+// ---- KULLANICI bağlamı (UI süreci — servis DEĞİL; %APPDATA%/%LOCALAPPDATA% kullanıcı profili) ----
+
+/// Discord'u onar: süreçleri sonlandır + önbellek klasörlerini temizle ("Checking for updates" takılması).
+#[tauri::command]
+async fn repair_discord() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(repair::repair_discord)
+        .await
+        .map_err(|e| format!("görev hatası: {e}"))?
+}
+
+/// WebCord kur (Discord alternatifi — GitHub release zip'i %LOCALAPPDATA%\evorift\WebCord altına).
+#[tauri::command]
+async fn install_webcord() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(repair::install_webcord)
+        .await
+        .map_err(|e| format!("görev hatası: {e}"))?
+}
+
+/// Install Discord PTB via the direct PTB endpoint (docs/05 §2). User context; no admin needed.
+#[tauri::command]
+async fn install_discord_ptb() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(repair::install_discord_ptb)
+        .await
+        .map_err(|e| format!("task error: {e}"))?
+}
+
+/// Verify bundled binary SHA-256 hashes against resources/manifest.json (item 10.3).
+/// Returns JSON array of `VerifyResult`. Advisory — mismatches are logged, never fatal.
+#[tauri::command]
+async fn verify_manifest() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let results = manifest::verify_all()?;
+        serde_json::to_string(&results).map_err(|e| format!("serialize error: {e}"))
+    })
+    .await
+    .map_err(|e| format!("task error: {e}"))?
+}
+
+/// Attach any app .exe to the ProxiFyre SOCKS5 proxy (docs/03 §2.3 generic wizard).
+/// `exe_name` — bare filename, e.g. "MyGame.exe". Privileged; no-op when bundle absent.
+#[tauri::command]
+async fn attach_app_to_proxy(exe_name: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || repair::attach_app_to_proxy(&exe_name))
+        .await
+        .map_err(|e| format!("task error: {e}"))?
+}
+
+/// Derived health signal for BlackHole gating (item 11.2). → JSON HealthSignal.
+#[tauri::command]
+async fn health() -> Result<String, String> {
+    data_cmd(Command::Health).await
+}
+
+/// WARP tunnel health snapshot (item 11.1). → JSON TunnelState.
+#[tauri::command]
+async fn tunnel_status() -> Result<String, String> {
+    data_cmd(Command::TunnelStatus).await
+}
+
+/// Discord kurulum yolunu bul (çalışan süreç → %LOCALAPPDATA%\Discord\app-*).
+#[tauri::command]
+async fn find_discord_path() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(repair::find_discord_path)
+        .await
+        .unwrap_or(None)
+}
+
+// ---- Çalışma modu + servis kontrolü (servissiz ↔ servisli "ekstra koruma") ----
+
+/// UI'ye çalışma modunu bildirir → banner/buton durumu. mode: "service" | "serviceless" | "limited".
+#[derive(Serialize)]
+struct RuntimeMode {
+    /// UI süreci yönetici mi (serviceless için gerekli).
+    elevated: bool,
+    /// EvoriftSvc durumu: "running" | "stopped" | "absent".
+    service: String,
+    /// Etkin mod: "service" (kalıcı, UI'siz çalışır) | "serviceless" (yönetici UI motoru taşır) |
+    /// "limited" (ne servis ne yönetici → koruma yok; elevate veya servis kur).
+    mode: String,
+}
+
+/// UI açılışta + durum değişiminde çağırır → hangi modda olduğumuzu göster (banner/buton mantığı).
+#[tauri::command]
+fn runtime_mode() -> RuntimeMode {
+    let elevated = process_is_elevated();
+    let service = svcctl::status().to_string();
+    let mode = if service == "running" {
+        "service"
+    } else if elevated {
+        "serviceless"
+    } else {
+        "limited"
+    }
+    .to_string();
+    RuntimeMode { elevated, service, mode }
+}
+
+/// EvoriftSvc durumu (UI rozeti): "running" | "stopped" | "absent".
+#[tauri::command]
+fn service_status() -> String {
+    svcctl::status().to_string()
+}
+
+/// "Ekstra koruma"yı aç: EvoriftSvc'yi kur + başlat (boot'ta otomatik koru, UI kapalıyken çalış).
+/// YÖNETİCİ gerekir (sc create). Kurulumdan sonra UI'nin yeniden başlatılması önerilir (servis pipe'ı devralır).
+#[tauri::command]
+async fn install_service() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(svcctl::install)
+        .await
+        .map_err(|e| format!("görev hatası: {e}"))?
+}
+
+/// "Ekstra koruma"yı kapat: EvoriftSvc'yi durdur + kaldır (servissiz moda dön). YÖNETİCİ gerekir.
+#[tauri::command]
+async fn uninstall_service() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(svcctl::uninstall)
+        .await
+        .map_err(|e| format!("görev hatası: {e}"))?
+}
+
+/// Create a support bundle ZIP (logs + system summary) and return the path.
+/// Returns the absolute path to the created zip file so the frontend can show it / open it.
+#[tauri::command]
+async fn create_log_bundle() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let out = crate::sys::log_dir().join("evorift-bundle.zip");
+        logbundle::create_bundle(&out).map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("görev hatası: {e}"))?
+}
+
+/// Start EvoriftSvc (sc start) — requires admin.
+#[tauri::command]
+async fn start_svc() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let out = hidden_command("sc")
+            .args(["start", svcctl::SERVICE_NAME])
+            .output()
+            .map_err(|e| format!("sc start çalıştırılamadı: {e}"))?;
+        if out.status.success() || String::from_utf8_lossy(&out.stdout).contains("RUNNING") {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        }
+    })
+    .await
+    .map_err(|e| format!("görev hatası: {e}"))?
+}
+
+/// Stop EvoriftSvc (sc stop) — requires admin.
+#[tauri::command]
+async fn stop_svc() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let out = hidden_command("sc")
+            .args(["stop", svcctl::SERVICE_NAME])
+            .output()
+            .map_err(|e| format!("sc stop çalıştırılamadı: {e}"))?;
+        if out.status.success() || String::from_utf8_lossy(&out.stdout).contains("STOPPED") {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        }
+    })
+    .await
+    .map_err(|e| format!("görev hatası: {e}"))?
+}
+
+/// Restart the active DPI engine: send Stop then Start over IPC.
+/// Useful after changing engine params (GoodbyeDPI mode, ByeDPI flags) to apply them live.
+#[tauri::command]
+async fn restart_engine() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        // Stop (ignore error — engine might already be stopped)
+        let _ = client::command(Command::Stop);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        // Start
+        match client::command(Command::Start)? {
+            Response::Error { message } => Err(message),
+            _ => Ok(()),
+        }
+    })
+    .await
+    .map_err(|e| format!("görev hatası: {e}"))?
 }
 
 /// Windows ile otomatik başlat (Faz 4.7). HKCU\…\Run anahtarına yazar/siler — eklenti gerektirmez,
@@ -545,16 +899,54 @@ fn toggle_window(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // YALNIZ DEV (debug): ayrıcalıklı servis kurulu değilken UI↔IPC uçtan uca çalışsın diye
-    // pipe sunucusunu gömülü bir iş parçacığında çalıştır. RELEASE'de bu YOK → gerçek LocalSystem
-    // `EvoriftSvc` serve eder; app asla pipe için onunla YARIŞMAZ (aksi halde app önce açılırsa
-    // pipe'ı SimEngine ile kapıp gerçek bypass'ı engellerdi). Güvenlik+doğruluk: P7 A10.
-    #[cfg(debug_assertions)]
-    std::thread::spawn(|| {
-        if let Err(e) = service::serve_blocking() {
-            eprintln!("[evorift] gömülü dev sunucusu başlamadı (muhtemelen EvoriftSvc çalışıyor): {e}");
+    // SERVİSSİZ MOD: yönetici UI, motoru (winws + WARP) KENDİ İÇİNDE çalıştırır — ayrı servise GEREK YOK.
+    // Karar (öncelik sırası):
+    //   • DEV (debug_assertions) → ALWAYS embedded. Stop any running EvoriftSvc first so its old binary
+    //     doesn't conflict with the freshly compiled IPC protocol. This prevents the token-mismatch
+    //     "handshake reddedildi" loop caused by an installed service running a stale binary.
+    //   • RELEASE + EvoriftSvc ÇALIŞIYOR  → ona bırak (pipe'ı o sahiplenir); UI yalnız IPC istemcisi.
+    //   • RELEASE + EvoriftSvc KURULU+DURDURULMUŞ → start dene (elevated ise); başlamazsa embedded aç.
+    //   • RELEASE + UI YÖNETİCİ + servis YOK (absent) → gömülü serve_blocking aç.
+    //   • RELEASE + UI YETKİSİZ + servis YOK → embedded AÇMA; "limited" mod (sim-only).
+    let svc_state = svcctl::status();
+    let want_embedded = if cfg!(debug_assertions) {
+        // Dev mode: always use embedded server so we test the freshly compiled code.
+        // Stop EvoriftSvc if running — its stale binary would clash with the freshly compiled IPC.
+        // Also handles the "stopped but auto-restarts" race: we keep polling until truly stopped.
+        if svc_state != "absent" {
+            let _ = hidden_command("sc").args(["stop", svcctl::SERVICE_NAME]).output();
+            // Wait up to 3 seconds for the service to fully stop so it can't overwrite our token.
+            for _ in 0..6 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if svcctl::status() != "running" {
+                    break;
+                }
+            }
         }
-    });
+        true
+    } else if svc_state == "running" {
+        // Release: service owns the pipe — don't compete.
+        false
+    } else if svc_state == "stopped" {
+        // Release: service installed but not running — try to start it.
+        if process_is_elevated() {
+            let _ = hidden_command("sc").args(["start", svcctl::SERVICE_NAME]).output();
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            svcctl::status() != "running"
+        } else {
+            false // not elevated, not running → limited mode (no embedded in release)
+        }
+    } else {
+        // svc_state == "absent" — no service installed.
+        process_is_elevated()
+    };
+    if want_embedded {
+        std::thread::spawn(|| {
+            if let Err(e) = service::serve_blocking() {
+                eprintln!("[evorift] gömülü sunucu başlamadı (EvoriftSvc çalışıyor olabilir): {e}");
+            }
+        });
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -648,15 +1040,46 @@ pub fn run() {
             set_limit,
             set_hostlist,
             set_app_modes,
+            set_full_warp,
             connectivity_test,
             dns_status,
             list_apps,
             detect_app_domains,
+            get_app_icons,
             set_autostart,
             set_tray_tooltip,
             set_tray_labels,
             is_admin,
-            relaunch_as_admin
+            relaunch_as_admin,
+            engine_catalog,
+            set_engine,
+            list_profiles,
+            save_profile,
+            delete_profile,
+            export_profile,
+            apply_profile,
+            reset_dns,
+            verify_dns,
+            preflight,
+            diagnose,
+            autopilot,
+            rollback_all,
+            repair_discord,
+            install_webcord,
+            install_discord_ptb,
+            attach_app_to_proxy,
+            verify_manifest,
+            find_discord_path,
+            runtime_mode,
+            service_status,
+            install_service,
+            uninstall_service,
+            start_svc,
+            stop_svc,
+            restart_engine,
+            create_log_bundle,
+            health,
+            tunnel_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

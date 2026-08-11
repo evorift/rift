@@ -413,11 +413,34 @@ Var AppStartMenuFolder
 ; Show run app after installation.
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_FUNCTION RunMainBinary
+; Koyu zeminde gorunmeyen finish-page checkbox yazilarini (Run / kisayol olustur) acik renge boya.
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW FinishpageDarkText
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
 !insertmacro MUI_PAGE_FINISH
 
 Function RunMainBinary
   nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" ""
+FunctionEnd
+
+; Finish sayfasi koyu (MUI_BGCOLOR=siyah) ama Run/ShowReadme checkbox metinleri sistem siyahi ->
+; gorunmez kaliyordu. Inner dialog'daki 1201-1205 kontrollerini acik yesil-beyaz metne boya.
+Function FinishpageDarkText
+  Push $7
+  Push $8
+  Push $9
+  FindWindow $9 "#32770" "" $HWNDPARENT
+  StrCpy $8 1201
+  fdt_loop:
+    GetDlgItem $7 $9 $8
+    StrCmp $7 0 fdt_next 0
+      SetCtlColors $7 D6F5DE 000000
+    fdt_next:
+    IntOp $8 $8 + 1
+    IntCmp $8 1206 fdt_done fdt_loop fdt_done
+  fdt_done:
+  Pop $9
+  Pop $8
+  Pop $7
 FunctionEnd
 
 ; Uninstaller Pages

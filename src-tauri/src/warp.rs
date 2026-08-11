@@ -22,6 +22,17 @@
 ///    (rtt ~70 ms, çift yönlü). Eski dar `104.29.146.0/24` başka bölge medya IP'lerini kaçırıyordu.
 pub const ALLOWED_IPS: &str = "162.159.0.0/16, 66.22.0.0/16, 104.29.0.0/16";
 
+/// Tam Koruma (full-tunnel): TÜM sistem trafiği WARP'tan geçer (standart WARP/VPN davranışı —
+/// per-app DEĞİL). wireguard.exe AllowedIPs=0.0.0.0/0 görünce endpoint (WARP_ENDPOINT) için /32
+/// hariç-tutma route'unu OTOMATİK ekler → el-sıkışma paketi fiziksel arayüzden çıkar (routing loop yok).
+pub const FULL_ALLOWED_IPS: &str = "0.0.0.0/0, ::/0";
+
+/// Tam Koruma (full-tunnel) tünel DNS'i. KRİTİK: AllowedIPs `/0` → WireGuard-for-Windows OTOMATİK
+/// WFP kill-switch kurar ve YALNIZ config'deki `DNS=` sunucularına çözümlemeye izin verir. Full modda
+/// `DNS=` YOKSA tüm DNS bloklanır → "bağlı ama internet yok / sayfa açılmıyor". Cloudflare resolver'ları
+/// pinlenir (Cloudflare One client'ın davranışı). Split modda DNS YAZILMAZ (sistem DoH yetkili kalır).
+pub const WARP_DNS: &str = "1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001";
+
 /// WARP anycast endpoint'i (net3/SOLUTION.md §6.2 ile birebir). KRİTİK: endpoint AllowedIPs aralıklarının
 /// DIŞINDA olmalı. wgcf varsayılanı `engage.cloudflareclient.com` 162.159.x'e çözülebilir → o ise
 /// `162.159.0.0/16` AllowedIPs'in İÇİNDE kalır → WireGuard kendi tünel paketini tünelden geçirmeye çalışır
@@ -31,6 +42,57 @@ pub const WARP_ENDPOINT: &str = "188.114.98.224:2408";
 /// WireGuard tünel adı (servis adı `WireGuardTunnel$warp`; conf dosya tabanı ile birebir olmalı).
 pub const TUNNEL_NAME: &str = "warp";
 
+// --- wgcf lifecycle (item 4.2): account/profile management, refresh, register-error handling ---
+
+/// wgcf account file (the WARP account) and profile file (full-tunnel raw conf). Both are persisted
+/// under `%PROGRAMDATA%\evorift` and ACL-hardened (they carry the private WARP credentials/key).
+pub const WGCF_ACCOUNT: &str = "wgcf-account.toml";
+pub const WGCF_PROFILE: &str = "wgcf-profile.conf";
+
+/// Cached-profile staleness threshold (wgcf's own weekly refresh cadence, docs/03 §1.1). Refresh is
+/// opt-in/manual — we never auto-download (binaries are bundled).
+pub const PROFILE_MAX_AGE_DAYS: u64 = 7;
+
+pub fn account_path() -> std::path::PathBuf {
+    crate::ipc::data_dir().join(WGCF_ACCOUNT)
+}
+pub fn profile_path() -> std::path::PathBuf {
+    crate::ipc::data_dir().join(WGCF_PROFILE)
+}
+
+/// wgcf should `generate` a profile only when one isn't cached (item 4.2: generate-when-missing,
+/// reuse-when-present so the keypair stays stable per install).
+pub fn should_generate(profile: &std::path::Path) -> bool {
+    !profile.exists()
+}
+
+/// Is the cached profile older than `max_age_days`? Best-effort (false if mtime unknown). Advisory —
+/// WARP profiles don't hard-expire; drives the optional refresh.
+pub fn profile_is_stale(profile: &std::path::Path, max_age_days: u64) -> bool {
+    match std::fs::metadata(profile).and_then(|m| m.modified()) {
+        Ok(mtime) => mtime
+            .elapsed()
+            .map(|e| e.as_secs() > max_age_days.saturating_mul(86_400))
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// Turn a wgcf register failure into an actionable message. Cloudflare blocks free registration from
+/// some IPs/regions as "abusive usage" (docs/03 §1.1) → tell the user to use a DPI engine instead.
+pub fn register_error_message(stderr: &str) -> String {
+    let lower = stderr.to_lowercase();
+    if lower.contains("abusive")
+        || lower.contains("access denied")
+        || lower.contains("forbidden")
+        || lower.contains("429")
+    {
+        "WARP registration was rejected by Cloudflare (free-tier block on this IP/region). Use a DPI engine instead, or try again later from a different network.".into()
+    } else {
+        format!("wgcf register failed (network?): {stderr}")
+    }
+}
+
 /// wgcf'in ürettiği profili split-tunnel'a çevir:
 ///  1. TÜM `AllowedIPs` satırlarını (tam-tünel `0.0.0.0/0, ::/0`) tek `AllowedIPs = {allowed_ips}` ile değiştir.
 ///  2. `Endpoint =` satırını sabit `{endpoint}` ile değiştir: wgcf varsayılanı (`engage.cloudflareclient.com`)
@@ -38,6 +100,7 @@ pub const TUNNEL_NAME: &str = "warp";
 ///     tünelden geçirir → ROUTING LOOP. Tünellenen aralıkların DIŞINDAki sabit IP buna engel (net3 §6.2).
 ///  3. `DNS =` satırını düşür: aksi halde WireGuard-for-Windows tünel açıkken onu SİSTEM çözümleyicisi olarak
 ///     zorlar ve Cloudflare DoH'umuzu (§5) ezer → sistem DoH yetkili kalsın.
+///
 /// Saf string işleme → `cargo test` ile doğrulanır.
 pub fn split_tunnel_config(profile: &str, allowed_ips: &str, endpoint: &str) -> String {
     let mut out = String::with_capacity(profile.len());
@@ -63,7 +126,7 @@ pub fn split_tunnel_config(profile: &str, allowed_ips: &str, endpoint: &str) -> 
             continue;
         }
         if lower.starts_with("dns") {
-            continue; // tünel DNS'ini düşür (sistem DoH yetkili kalsın)
+            continue; // tünel DNS'ini düşür (split: sistem DoH yetkili; full: DNS sonra inject_interface_dns ile pinlenir)
         }
         out.push_str(line);
         out.push('\n');
@@ -83,10 +146,82 @@ pub fn split_tunnel_config(profile: &str, allowed_ips: &str, endpoint: &str) -> 
     out
 }
 
+/// `[Interface]` bölümünün hemen ardına `DNS = {dns}` satırı ekle (full-tunnel için). split_tunnel_config
+/// DNS'i sildiği için full modda bunu ÇAĞIR → kill-switch DNS'i beyaz-listeler (yoksa tüm DNS bloklanır).
+/// İdempotent değil; full modda conf üretiminde bir kez çağrılır. DNS [Interface]'de olmalı ([Peer]'da değil).
+pub fn inject_interface_dns(conf: &str, dns: &str) -> String {
+    let mut out = String::with_capacity(conf.len() + dns.len() + 8);
+    let mut injected = false;
+    for line in conf.lines() {
+        out.push_str(line);
+        out.push('\n');
+        if !injected && line.trim().eq_ignore_ascii_case("[interface]") {
+            out.push_str("DNS = ");
+            out.push_str(dns);
+            out.push('\n');
+            injected = true;
+        }
+    }
+    out
+}
+
+// --- MTU clamp + app-based (WireSock-style) tunnel (item 4.3) ---
+
+/// wgcf's default tunnel MTU (the safe value matching the official WARP app). Clamp lower (1200/1180)
+/// on restrictive ISPs where large TLS/QUIC flows hang (PMTUD blackholing) but small packets work.
+pub const MTU_DEFAULT: u32 = 1280;
+
+/// Set the `MTU =` line in `[Interface]` to `mtu` (replace if present, else inject right after the
+/// `[Interface]` header). Pure string transform → unit-tested. Lets restrictive ISPs clamp 1280→1200/1180.
+pub fn set_mtu(conf: &str, mtu: u32) -> String {
+    let has_mtu = conf.lines().any(|l| l.trim_start().to_ascii_lowercase().starts_with("mtu"));
+    let mut out = String::with_capacity(conf.len() + 16);
+    for line in conf.lines() {
+        if line.trim_start().to_ascii_lowercase().starts_with("mtu") {
+            out.push_str(&format!("MTU = {mtu}\n"));
+            continue; // drop the original MTU line (replaced)
+        }
+        out.push_str(line);
+        out.push('\n');
+        if !has_mtu && line.trim().eq_ignore_ascii_case("[interface]") {
+            out.push_str(&format!("MTU = {mtu}\n")); // inject when none existed
+        }
+    }
+    out
+}
+
+/// Default app list for app-based (WireSock) tunneling (docs/03 §1.2 — Discord/Roblox + helpers).
+pub fn default_tunnel_apps() -> Vec<String> {
+    [
+        "Discord.exe", "DiscordPTB.exe", "Update.exe", "webcord.exe",
+        "RobloxPlayerBeta.exe", "RobloxPlayerInstaller.exe", "discord", "roblox",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// Build a WireSock-style **app-based** tunnel conf (item 4.3): full `AllowedIPs` (everything) plus an
+/// `AllowedApps = <names>` line so only the listed apps are tunneled (docs/03 §1.2). Used by the WireSock
+/// adapter (item 4.4). Endpoint replaced (loop-safe) + DNS dropped — same discipline as `split_tunnel_config`.
+/// NOTE: `AllowedApps` is a WireSock extension; the official `wireguard.exe` ignores it (use IP-split there).
+pub fn app_tunnel_config(profile: &str, apps: &[String], endpoint: &str) -> String {
+    let mut out = split_tunnel_config(profile, FULL_ALLOWED_IPS, endpoint);
+    if !apps.is_empty() {
+        out.push_str("AllowedApps = ");
+        out.push_str(&apps.join(", "));
+        out.push('\n');
+    }
+    out
+}
+
 /// Discord'u WARP tüneliyle bağlayan motor. Servis Start/Stop'ta winws'in YANINDA çalıştırır.
 /// Hatalar ÖLÜMCÜL DEĞİL (servis loglar + devam eder; winws web'i kapsar).
 pub struct WarpEngine {
     running: bool,
+    /// Açık tünel full-tunnel (tüm sistem, Tam Koruma) mı yoksa split-tunnel (Discord IP'leri) mı.
+    /// Mod değişiminde tünel kaldırılıp doğru conf ile yeniden kurulur.
+    full: bool,
 }
 
 impl Default for WarpEngine {
@@ -97,38 +232,90 @@ impl Default for WarpEngine {
 
 impl WarpEngine {
     pub fn new() -> Self {
-        Self { running: false }
+        Self { running: false, full: false }
     }
 
     pub fn is_running(&self) -> bool {
         self.running
     }
 
+    /// True if the tunnel was started in full-tunnel mode (all-system protection).
+    pub fn is_full(&self) -> bool {
+        self.full
+    }
+
+    /// True if the `WireGuardTunnel$warp` Windows service is present (public wrapper for the
+    /// private `tunnel_installed()` used by `start()` idempotency check and health queries).
+    pub fn is_installed() -> bool {
+        #[cfg(windows)]
+        return Self::tunnel_installed();
+        #[cfg(not(windows))]
+        return false;
+    }
+
+    /// Seconds since the most recent WireGuard peer handshake, queried from the WireGuard
+    /// userspace pipe (`\\.\pipe\ProtectedPrefix\Localsystem\WireGuard\warp`). Returns `None`
+    /// when the tunnel is not running, no handshake has occurred yet, or the pipe is inaccessible.
+    #[cfg(windows)]
+    pub fn handshake_ago_secs() -> Option<u64> {
+        use std::io::{Read, Write};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let pipe = format!(r"\\.\pipe\ProtectedPrefix\Localsystem\WireGuard\{TUNNEL_NAME}");
+        let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&pipe).ok()?;
+        f.write_all(b"get=1\n\n").ok()?;
+        let mut buf = [0u8; 8192];
+        let n = f.read(&mut buf).ok()?;
+        let text = std::str::from_utf8(&buf[..n]).ok()?;
+        for line in text.lines() {
+            if let Some(v) = line.strip_prefix("last_handshake_time_sec=") {
+                let epoch: u64 = v.trim().parse().ok()?;
+                if epoch == 0 {
+                    return None; // no handshake yet (WireGuard reports 0 before the first one)
+                }
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+                return Some(now.saturating_sub(epoch));
+            }
+        }
+        None
+    }
+    #[cfg(not(windows))]
+    pub fn handshake_ago_secs() -> Option<u64> {
+        None
+    }
+
     /// Tüneli aç: config'i garanti et (ilk çalıştırmada wgcf ile üret) → `wireguard.exe
     /// /installtunnelservice`. Idempotent: tünel zaten kuruluysa yeniden kurmaz.
     #[cfg(windows)]
-    pub fn start(&mut self) -> Result<(), String> {
+    pub fn start(&mut self, full: bool) -> Result<(), String> {
         let exe = match Self::wireguard_exe() {
             Some(e) if e.exists() => e,
             _ => {
                 // Dev/bundle yok: gerçek tünel yok ama UI↔IPC zinciri çalışsın (sim). Hata DÖNDÜRME.
                 eprintln!("[evorift][warp] bundle yok (wireguard.exe) — sim (gerçek tünel yok)");
                 self.running = true;
+                self.full = full;
                 return Ok(());
             }
         };
-        let conf = Self::ensure_config()?; // wgcf ile üret/oku (ağ gerekebilir; başarısızsa Err)
-        if Self::tunnel_installed() {
-            self.running = true; // önceki örnekten kalan tünel → yeniden kullan (idempotent, kesintisiz)
+        // Zaten istenen moddaysa no-op (idempotent, kesintisiz).
+        if self.running && self.full == full && Self::tunnel_installed() {
             return Ok(());
         }
+        // Mod değişimi (split↔full) veya bayat tünel: önce mevcut tüneli kaldır → doğru conf ile temiz kur.
+        if Self::tunnel_installed() {
+            let _ = Self::run_hidden(&exe, &["/uninstalltunnelservice".into(), TUNNEL_NAME.into()], None);
+        }
+        let conf = Self::ensure_config(full)?; // wgcf ile üret/oku (ağ gerekebilir; başarısızsa Err)
         Self::run_hidden(&exe, &["/installtunnelservice".into(), conf.to_string_lossy().into_owned()], None)?;
         self.running = true;
+        self.full = full;
         Ok(())
     }
     #[cfg(not(windows))]
-    pub fn start(&mut self) -> Result<(), String> {
+    pub fn start(&mut self, full: bool) -> Result<(), String> {
         self.running = true;
+        self.full = full;
         Ok(())
     }
 
@@ -165,7 +352,10 @@ impl WarpEngine {
         Some(Self::bundle_dir()?.join("wgcf.exe"))
     }
 
-    /// Üretilmiş + split-tunnel'a çevrilmiş tünel config'i: `%PROGRAMDATA%\evorift\warp.conf`.
+    /// Tünel config yolu — TEK dosya (`warp.conf`). KRİTİK: WireGuard servis adı conf DOSYA ADINDAN
+    /// türer (`WireGuardTunnel$warp`). Farklı ad (warp-full) → farklı servis → tunnel_installed()/stop()
+    /// (TUNNEL_NAME="warp") onu GÖREMEZ → mod değişiminde iki tünel çakışır. Bu yüzden mod ne olursa olsun
+    /// aynı dosyaya yazılır; içerik (AllowedIPs) moda göre ensure_config(full) ile YENİDEN üretilir.
     #[cfg(windows)]
     fn conf_path() -> std::path::PathBuf {
         crate::ipc::data_dir().join("warp.conf")
@@ -180,37 +370,68 @@ impl WarpEngine {
 
     /// warp.conf'u garanti et. Varsa olduğu gibi kullan (per-install özel anahtar kalıcı). Yoksa:
     /// wgcf register (hesap) → wgcf generate (profil) → split-tunnel'a çevir → korumalı ACL ile yaz.
+    /// İstenen moda göre tünel config'ini garanti et (varsa olduğu gibi kullan; yoksa wgcf profilinden üret).
+    /// `full=true` → AllowedIPs=0.0.0.0/0,::/0 (tüm sistem · Tam Koruma); `false` → Discord split-tunnel.
+    /// İstenen moda göre `warp.conf`'u (YENİDEN) üret — split vs full AllowedIPs farklı olduğundan her
+    /// (yeniden) kurulumda doğru içerikle yazılır (bayat conf'u REUSE ETME → modlar karışmasın). wgcf
+    /// profili (özel anahtar) önbellekli kalır → yalnız ucuz dönüştürme + yazma tekrarlanır.
     #[cfg(windows)]
-    fn ensure_config() -> Result<std::path::PathBuf, String> {
+    fn ensure_config(full: bool) -> Result<std::path::PathBuf, String> {
         let conf = Self::conf_path();
-        if conf.exists() {
-            return Ok(conf);
+        let profile = Self::ensure_profile()?;
+        // İstenen AllowedIPs + loop-güvenli sabit endpoint ile dönüştür → yaz → ACL sıkılaştır.
+        let allowed = if full { FULL_ALLOWED_IPS } else { ALLOWED_IPS };
+        let mut cfg = split_tunnel_config(&profile, allowed, WARP_ENDPOINT);
+        if full {
+            // Full-tunnel: tünel DNS'ini [Interface]'e pinle → /0 kill-switch DNS'i beyaz-listeler
+            // (yoksa tüm DNS bloklanır → "bağlı ama internet yok"). Cloudflare One client davranışı.
+            cfg = inject_interface_dns(&cfg, WARP_DNS);
         }
-        let wgcf = match Self::wgcf_exe() {
-            Some(w) if w.exists() => w,
-            _ => return Err("wgcf.exe bundle'da yok → WARP config üretilemiyor".into()),
-        };
-        let dir = crate::ipc::data_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| format!("data dizini oluşturulamadı: {e}"))?;
-
-        // 1) Hesap (yalnız yoksa kaydet — wgcf register var olan hesabı reddedebilir; kalıcı tut).
-        let account = dir.join("wgcf-account.toml");
-        if !account.exists() {
-            Self::run_hidden(&wgcf, &["register".into(), "--accept-tos".into()], Some(dir.as_path()))
-                .map_err(|e| format!("wgcf register başarısız (ağ?): {e}"))?;
-        }
-        // 2) Profil üret (AllowedIPs = 0.0.0.0/0, ::/0 içeren tam-tünel config).
-        Self::run_hidden(&wgcf, &["generate".into()], Some(dir.as_path()))
-            .map_err(|e| format!("wgcf generate başarısız: {e}"))?;
-        let profile_path = dir.join("wgcf-profile.conf");
-        let profile = std::fs::read_to_string(&profile_path)
-            .map_err(|e| format!("wgcf profili okunamadı ({}): {e}", profile_path.display()))?;
-
-        // 3) Split-tunnel'a çevir (Discord IP'leri + loop-güvenli endpoint) + 4) yaz + 5) ACL sıkılaştır.
-        let split = split_tunnel_config(&profile, ALLOWED_IPS, WARP_ENDPOINT);
-        std::fs::write(&conf, split).map_err(|e| format!("warp.conf yazılamadı: {e}"))?;
+        std::fs::write(&conf, cfg).map_err(|e| format!("{} yazılamadı: {e}", conf.display()))?;
         Self::harden_conf_acl(&conf);
         Ok(conf)
+    }
+
+    /// wgcf profilini garanti et (hesap kaydı + profil üretimi; ikisi de kalıcı/önbellekli — split + full
+    /// conf bu TEK profilden türer, böylece anahtar çifti install başına sabit kalır).
+    #[cfg(windows)]
+    fn ensure_profile() -> Result<String, String> {
+        let wgcf = match Self::wgcf_exe() {
+            Some(w) if w.exists() => w,
+            _ => return Err("wgcf.exe not in bundle → cannot generate WARP config".into()),
+        };
+        let dir = crate::ipc::data_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| format!("data dir create failed: {e}"))?;
+        let account = account_path();
+        let profile = profile_path();
+        // 1) Account: register only when missing (wgcf rejects re-registering an existing account; keep
+        //    persistent). On failure classify the error (Cloudflare abusive-usage block → actionable msg).
+        //    Harden the account file ACL — it holds the WARP private account.
+        if !account.exists() {
+            Self::run_hidden(&wgcf, &["register".into(), "--accept-tos".into()], Some(dir.as_path()))
+                .map_err(|e| register_error_message(&e))?;
+            Self::harden_conf_acl(&account);
+        }
+        // 2) Profile: generate only when missing (keypair stays stable per install; split + full conf
+        //    derive from this one profile). Harden its ACL — it carries the private key.
+        if should_generate(&profile) {
+            Self::run_hidden(&wgcf, &["generate".into()], Some(dir.as_path()))
+                .map_err(|e| format!("wgcf generate failed: {e}"))?;
+            Self::harden_conf_acl(&profile);
+        }
+        std::fs::read_to_string(&profile)
+            .map_err(|e| format!("wgcf profile read failed ({}): {e}", profile.display()))
+    }
+
+    /// Force a profile refresh (item 4.2): delete the cached profile so the next ensure regenerates it
+    /// (the account is kept). Use when the profile is stale (`profile_is_stale`) or broken.
+    #[cfg(windows)]
+    pub fn refresh_profile() -> Result<(), String> {
+        let p = profile_path();
+        if p.exists() {
+            std::fs::remove_file(&p).map_err(|e| format!("profile delete failed: {e}"))?;
+        }
+        Self::ensure_profile().map(|_| ())
     }
 
     /// warp.conf özel anahtar taşır → ACL'i SYSTEM + Administrators FULL'e indir, miras kes. icacls
@@ -322,5 +543,78 @@ mod tests {
                 "WARP_ENDPOINT {WARP_ENDPOINT} falls inside AllowedIPs prefix {prefix} → routing loop"
             );
         }
+    }
+
+    /// Item 4.2: profile generated when missing, reused when present; fresh file not stale.
+    #[test]
+    fn should_generate_missing_reuse_present() {
+        let p = std::env::temp_dir().join("evorift-test-wgcf-profile.conf");
+        let _ = std::fs::remove_file(&p);
+        assert!(should_generate(&p), "missing → generate");
+        std::fs::write(&p, "[Interface]\nPrivateKey = X\n").unwrap();
+        assert!(!should_generate(&p), "present → reuse");
+        assert!(!profile_is_stale(&p, PROFILE_MAX_AGE_DAYS), "fresh file is not stale");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// Register failures are classified: Cloudflare abusive-usage block vs generic network error.
+    #[test]
+    fn register_error_classification() {
+        assert!(register_error_message("Error: Access denied (abusive usage)").contains("Cloudflare"));
+        assert!(register_error_message("429 Too Many Requests").contains("Cloudflare"));
+        assert!(register_error_message("dial tcp: i/o timeout").contains("network"));
+    }
+
+    /// Item 4.3: set_mtu replaces an existing MTU line and injects one (inside [Interface]) when missing.
+    #[test]
+    fn set_mtu_replace_and_inject() {
+        let out = set_mtu(SAMPLE, 1200);
+        assert!(out.contains("MTU = 1200"));
+        assert!(!out.contains("MTU = 1280"));
+        assert_eq!(out.matches("MTU = ").count(), 1, "exactly one MTU line");
+
+        let no_mtu = "[Interface]\nPrivateKey = X\n\n[Peer]\nEndpoint = a:1\n";
+        let out2 = set_mtu(no_mtu, 1180);
+        let iface = out2.find("[Interface]").unwrap();
+        let mtu = out2.find("MTU = 1180").unwrap();
+        let peer = out2.find("[Peer]").unwrap();
+        assert!(iface < mtu && mtu < peer, "injected MTU sits inside [Interface]");
+    }
+
+    /// app-based tunnel conf carries full AllowedIPs + an AllowedApps line (WireSock-style, item 4.3).
+    #[test]
+    fn app_tunnel_config_has_apps_and_full_ips() {
+        let apps = vec!["Discord.exe".to_string(), "roblox".to_string()];
+        let out = app_tunnel_config(SAMPLE, &apps, WARP_ENDPOINT);
+        assert!(out.contains("AllowedApps = Discord.exe, roblox"));
+        assert!(out.contains("0.0.0.0/0"), "full IPs for app-based routing");
+        assert!(out.contains(&format!("Endpoint = {WARP_ENDPOINT}")));
+        assert!(!out.contains("engage.cloudflareclient.com"), "endpoint replaced (loop-safe)");
+        assert!(!default_tunnel_apps().is_empty());
+    }
+
+    /// Item 11.1: WarpEngine accessors reflect state set by start()/stop(), is_installed() and
+    /// handshake_ago_secs() are callable without panicking (no real tunnel in CI).
+    #[test]
+    fn warp_engine_accessors_track_state() {
+        let mut w = WarpEngine::new();
+        assert!(!w.is_running(), "new engine not running");
+        assert!(!w.is_full(), "new engine not full-tunnel");
+
+        // Simulate start (non-Windows sim path sets running=true, full=<arg>).
+        let _ = w.start(true);
+        assert!(w.is_running(), "after start: running");
+        assert!(w.is_full(), "after start(true): full-tunnel");
+
+        w.stop();
+        assert!(!w.is_running(), "after stop: not running");
+
+        let _ = w.start(false);
+        assert!(w.is_running());
+        assert!(!w.is_full(), "start(false): split-tunnel");
+
+        // is_installed() and handshake_ago_secs() must not panic (no tunnel in tests).
+        let _ = WarpEngine::is_installed();       // on non-Windows always false; on Windows best-effort
+        let _ = WarpEngine::handshake_ago_secs(); // None when tunnel not running
     }
 }
