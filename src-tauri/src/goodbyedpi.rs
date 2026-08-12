@@ -278,10 +278,7 @@ impl BypassEngine for GoodbyeDpiEngine {
         use std::os::windows::process::CommandExt;
         let exe = match Self::exe() {
             Some(e) if e.exists() => e,
-            _ => {
-                eprintln!("[evorift][goodbyedpi] bundle missing (goodbyedpi.exe) — sim (no real bypass)");
-                return Ok(());
-            }
+            _ => return Err("goodbyedpi.exe bulunamadı — bundle eksik".into()),
         };
         let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         let gd = self.gd_args();

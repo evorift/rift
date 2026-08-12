@@ -232,10 +232,7 @@ impl BypassEngine for ByeDpiEngine {
         use std::os::windows::process::CommandExt;
         let exe = match Self::exe() {
             Some(e) if e.exists() => e,
-            _ => {
-                eprintln!("[evorift][byedpi] bundle missing (ciadpi.exe) — sim (no real proxy)");
-                return Ok(()); // fail-safe: boot never broken
-            }
+            _ => return Err("ciadpi.exe bulunamadı — bundle eksik".into()),
         };
         let args = self.config.to_args();
         crate::proc::kill_image("ciadpi.exe"); // single instance
@@ -331,8 +328,9 @@ mod tests {
         assert_eq!(SOCKS_PORT, 1080);
     }
 
-    /// Item 3.4: composite engine ids reflect the routing; build_args stays the ciadpi line; start/stop
-    /// in sim (no bundle, unprivileged) is a clean no-op.
+    /// Item 3.4: composite engine ids reflect the routing; build_args stays the ciadpi line; with no
+    /// bundle present (test env, unprivileged) start() must fail honestly — never a silent no-op
+    /// (evorift-remote-testing: silent success is the enemy).
     #[cfg(windows)]
     #[test]
     fn composite_modes() {
@@ -344,7 +342,7 @@ mod tests {
         let pf = ByeDpiEngine::with_routing(Routing::ProxiFyre { browsers: false });
         assert!(pf.build_args(&strategy_by_id("auto"), &[]).iter().any(|s| s == "--split"));
         let mut e = ByeDpiEngine::with_routing(Routing::Drover);
-        assert!(e.start(&strategy_by_id("auto"), &[]).is_ok());
+        assert!(e.start(&strategy_by_id("auto"), &[]).is_err(), "no ciadpi.exe in test env → must error, not fake success");
         e.stop();
     }
 }
