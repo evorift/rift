@@ -897,7 +897,14 @@ pub fn serve_blocking() -> io::Result<()> {
                 e.dpi.set_exclusion(&excl);
                 let strat = e.current_strategy();
                 let hl = e.hostlist.clone();
-                let _ = e.dpi.start(&strat, &hl);
+                // Respawn Result'ı ASLA at ma — çocuk süreç kayıp ve yeniden başlatılamıyorsa (bundle
+                // silindi/kilitlendi) running:true yalan söylemeye devam eder (bkz. evorift-remote-testing:
+                // "silent success is the enemy").
+                if let Err(m) = e.dpi.start(&strat, &hl) {
+                    e.running = false;
+                    e.state = RunState::Error;
+                    audit(&format!("watchdog: motor kayboldu, yeniden başlatılamadı: {m}"));
+                }
                 match e.warp_target() {
                     Some(full) if !e.warp.is_running() => {
                         let _ = e.warp.start(full);
@@ -974,20 +981,22 @@ mod tests {
         assert!(!e.health().healthy, "no metrics → not healthy");
     }
 
-    /// Item 7.2: apply_profile_obj handles desync, local-proxy, and tunnel profiles (sim engines in dev).
+    /// Item 7.2: apply_profile_obj handles desync, local-proxy, and tunnel profiles. Test env has no
+    /// winws.exe/ciadpi.exe bundle, so desync/local-proxy engines must HONESTLY error rather than take
+    /// the old silent-Ok "sim" path (evorift-remote-testing: silent success is the enemy).
     #[test]
     fn apply_three_engine_kinds() {
         let mut e = Engine::new();
-        // desync (zapret)
+        // desync (zapret) — no bundle in test env → honest error, running stays false
         let r = apply_profile_obj(&mut e, &prof("p1", "zapret", ScopeMode::System));
-        assert!(matches!(r, Response::Status(_)));
+        assert!(matches!(r, Response::Error { .. }));
         assert_eq!(e.engine_id, "zapret");
-        assert!(e.running);
-        // local-proxy (byedpi), Split scope → hostlist mode
+        assert!(!e.running);
+        // local-proxy (byedpi), Split scope → hostlist mode is set before start() is attempted
         apply_profile_obj(&mut e, &prof("p2", "byedpi", ScopeMode::Split));
         assert_eq!(e.engine_id, "byedpi");
         assert!(e.hostlist_only);
-        // tunnel (warp), System scope → full tunnel
+        // tunnel (warp), System scope → full tunnel (unconditional path, no binary gate)
         apply_profile_obj(&mut e, &prof("p3", "warp", ScopeMode::System));
         assert_eq!(e.engine_id, "warp");
         assert!(e.full_warp);
