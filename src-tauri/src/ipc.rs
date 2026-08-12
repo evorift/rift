@@ -35,7 +35,10 @@ pub enum Command {
     Start,
     Stop,
     Status,
-    SetStrategy { id: String },
+    /// `repeats_override`: live-verification-only knob (item: dpi-desync-repeats sweep). When `Some`,
+    /// overrides the resolved strategy's PRIMARY TLS/443 `--dpi-desync-repeats` value before it reaches
+    /// `Strategy::tls_profile_args()` — still the engine's own arg builder, never a hand-written winws line.
+    SetStrategy { id: String, #[serde(default)] repeats_override: Option<u32> },
     SetDns { profile: String },
     BlockApp { id: String, path: String, block: bool },
     Repair { tool: String },
@@ -104,6 +107,14 @@ pub struct EngineStatus {
     /// Durum makinesi (idle|applying|active|paused|error). Boş = bilinmiyor (eski istemci).
     #[serde(default)]
     pub state: String,
+    /// Proof-of-protection (item: honesty gate): unverified|verifying|verified|broken. `state == active`
+    /// yalnız motor sürecinin ayakta olduğunu kanıtlar — trafiğin gerçekten geçtiğini KANITLAMAZ. UI
+    /// "Protected" yalnız `verify == "verified"` iken göstermeli (applied-unverified ASLA korumalı değildir).
+    #[serde(default)]
+    pub verify: String,
+    /// `verify == "broken"` iken kullanıcıya gösterilecek neden; aksi halde boş.
+    #[serde(default)]
+    pub verify_reason: String,
 }
 
 /// Canlı telemetri (docs/05 §2 — tek batch ~1 Hz). WinDivert gelene kadar simüle.
@@ -146,16 +157,22 @@ pub fn validate(cmd: &Command) -> Result<(), String> {
         Ok(())
     }
     match cmd {
-        Command::SetStrategy { id } => {
+        Command::SetStrategy { id, repeats_override } => {
             // Accept "auto" or any known generic strategy / ISP preset id (item 1.5). Derived from the
             // engine catalog so new presets are accepted automatically (no second whitelist to maintain).
-            if id == "auto"
-                || crate::engine::strategies().iter().chain(crate::engine::presets().iter()).any(|s| s.id == id.as_str())
+            if id != "auto"
+                && !crate::engine::strategies().iter().chain(crate::engine::presets().iter()).any(|s| s.id == id.as_str())
             {
-                Ok(())
-            } else {
-                Err(format!("geçersiz strateji: {id}"))
+                return Err(format!("geçersiz strateji: {id}"));
             }
+            if let Some(r) = repeats_override {
+                // winws --dpi-desync-repeats realistically lives in single/low-double digits; cap well above
+                // any real sweep value to keep this a live-verification knob, not an arbitrary-arg injection.
+                if *r == 0 || *r > 64 {
+                    return Err(format!("geçersiz repeats_override: {r} (1-64 olmalı)"));
+                }
+            }
+            Ok(())
         }
         Command::SetDns { profile } => {
             one_of(profile, &["cloudflare", "quad9", "adguard", "google", "auto"], "dns")
@@ -626,12 +643,23 @@ mod tests {
             "kablonet", "turkcell-hotspot", "vodafone-hotspot",
         ] {
             assert!(
-                validate(&Command::SetStrategy { id: id.to_string() }).is_ok(),
+                validate(&Command::SetStrategy { id: id.to_string(), repeats_override: None }).is_ok(),
                 "strategy id '{id}' should be accepted"
             );
         }
-        assert!(validate(&Command::SetStrategy { id: "bogus".into() }).is_err());
-        assert!(validate(&Command::SetStrategy { id: String::new() }).is_err());
+        assert!(validate(&Command::SetStrategy { id: "bogus".into(), repeats_override: None }).is_err());
+        assert!(validate(&Command::SetStrategy { id: String::new(), repeats_override: None }).is_err());
+    }
+
+    /// live-verification item: repeats_override is accepted in 1..=64 and rejected outside it, independent
+    /// of whether the underlying strategy id itself is valid.
+    #[test]
+    fn set_strategy_repeats_override_range() {
+        assert!(validate(&Command::SetStrategy { id: "c1".into(), repeats_override: Some(1) }).is_ok());
+        assert!(validate(&Command::SetStrategy { id: "c1".into(), repeats_override: Some(64) }).is_ok());
+        assert!(validate(&Command::SetStrategy { id: "c1".into(), repeats_override: Some(0) }).is_err());
+        assert!(validate(&Command::SetStrategy { id: "c1".into(), repeats_override: Some(65) }).is_err());
+        assert!(validate(&Command::SetStrategy { id: "bogus".into(), repeats_override: Some(5) }).is_err());
     }
 
     /// Item 11.3: FRONTEND-CONTRACT.md exists and mentions every Command op (snake_case).

@@ -34,6 +34,11 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Proof-of-protection (item: honesty gate): a real TLS handshake against live Discord endpoints,
+# not just "the winws process is alive". Version pinned to what tauri-plugin-updater already
+# resolves transitively (see Cargo.lock) so this adds no new dependency tree, only a direct edge.
+rustls = "0.23"
+rustls-native-certs = "0.8"
 sha2 = "0.10"
 interprocess = "2"
 getrandom = "0.2"

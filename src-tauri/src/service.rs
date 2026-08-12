@@ -38,6 +38,36 @@ impl RunState {
     }
 }
 
+/// Proof-of-protection (item: honesty gate). Orthogonal to `RunState` — `RunState::Active` only
+/// means the DPI process is alive; `VerifyState` answers whether a real TLS handshake to live
+/// Discord endpoints actually got through. The UI must render "Protected" ONLY on `Verified`;
+/// `Unverified`/`Verifying` render as "applied — unverified", never as protected (evorift-remote-testing:
+/// "silent success is the enemy").
+#[derive(Clone, Debug, PartialEq)]
+enum VerifyState {
+    Unverified,
+    Verifying,
+    Verified,
+    Broken(String),
+}
+
+impl VerifyState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            VerifyState::Unverified => "unverified",
+            VerifyState::Verifying => "verifying",
+            VerifyState::Verified => "verified",
+            VerifyState::Broken(_) => "broken",
+        }
+    }
+    fn reason(&self) -> String {
+        match self {
+            VerifyState::Broken(r) => r.clone(),
+            _ => String::new(),
+        }
+    }
+}
+
 struct Engine {
     /// running = motor (winws/byedpi) gerçekten açık mı. state = kullanıcıya gösterilen durum makinesi.
     running: bool,
@@ -57,11 +87,19 @@ struct Engine {
     /// Hostlist mode (item 1.3): when true, the DPI desync is restricted to `hostlist` domains
     /// (winws `--hostlist`) instead of catch-all. Set by ApplyProfile when scope.mode == Split.
     hostlist_only: bool,
+    /// live-verification-only: overrides the resolved strategy's primary-stage repeats (dpi-desync-repeats
+    /// sweep, evorift-ctl `strat <id> --repeats=N`). `None` = use the strategy's own compiled value.
+    repeats_override: Option<u32>,
     /// Last telemetry sample cached here by the subscription thread (item 11.2). Used by
     /// `Command::Health` to derive the `HealthSignal` without requiring an active subscriber.
     last_metrics: Option<Metrics>,
     /// When `last_metrics` was last updated. `None` until the first telemetry tick arrives.
     metrics_at: Option<Instant>,
+    /// Proof-of-protection state (see `VerifyState`).
+    verify: VerifyState,
+    /// Bumped on every Start/Stop/restart. A background probe checks this before writing its result
+    /// back, so a slow probe from a session the user already stopped/restarted can't clobber newer state.
+    verify_gen: u64,
 }
 
 impl Engine {
@@ -79,8 +117,11 @@ impl Engine {
             warp: WarpEngine::new(),
             full_warp: false,
             hostlist_only: false,
+            repeats_override: None,
             last_metrics: None,
             metrics_at: None,
+            verify: VerifyState::Unverified,
+            verify_gen: 0,
         }
     }
 
@@ -90,6 +131,9 @@ impl Engine {
         let mut s = engine::strategy_by_id(&self.strategy);
         if self.hostlist_only {
             s.hostlist_only = true;
+        }
+        if let Some(r) = self.repeats_override {
+            s.repeats = r;
         }
         s
     }
@@ -134,7 +178,16 @@ impl Engine {
             dns: self.dns.clone(),
             engine: self.engine_id.clone(),
             state: self.state.as_str().to_string(),
+            verify: self.verify.as_str().to_string(),
+            verify_reason: self.verify.reason(),
         }
+    }
+
+    /// Engine no longer active (Stop, or a start/respawn failure) → proof-of-protection resets to
+    /// Unverified and any in-flight probe from the prior session is invalidated via `verify_gen`.
+    fn reset_verify(&mut self) {
+        self.verify = VerifyState::Unverified;
+        self.verify_gen += 1;
     }
 
     /// Derive the `HealthSignal` from the engine state + last cached telemetry (item 11.2).
@@ -162,6 +215,37 @@ impl Engine {
             None => self.warp.stop(),
         }
     }
+}
+
+/// Kick off the proof-of-protection probe: mark Verifying immediately (so the UI never keeps showing
+/// a stale Verified from before this apply) and run the real TLS handshake on a background thread.
+/// Caller must already hold `e`'s lock (`engine` is cloned for the thread; `e` is only touched here
+/// synchronously). See `Engine::reset_verify` for the generation-guard rationale.
+fn spawn_verify(engine: &Arc<Mutex<Engine>>, e: &mut Engine) {
+    e.verify = VerifyState::Verifying;
+    e.verify_gen += 1;
+    let my_gen = e.verify_gen;
+    let engine = Arc::clone(engine);
+    std::thread::spawn(move || {
+        let outcome = crate::verify::probe_discord();
+        let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+        if e.verify_gen != my_gen {
+            return; // stale — stopped/restarted since this probe was launched, discard the result
+        }
+        e.verify = if outcome.ok {
+            VerifyState::Verified
+        } else {
+            VerifyState::Broken(outcome.reason)
+        };
+        audit(&format!(
+            "verify: {}",
+            match &e.verify {
+                VerifyState::Verified => "verified (real TLS handshake to Discord succeeded)".to_string(),
+                VerifyState::Broken(r) => format!("broken: {r}"),
+                VerifyState::Unverified | VerifyState::Verifying => unreachable!(),
+            }
+        ));
+    });
 }
 
 /// Boot'ta otomatik açılan korumanın varsayılan hostlist'i (state.svelte.ts CORE_SITES + YouTube).
@@ -196,10 +280,12 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
                     e.dpi.set_limits(&ll);
                     e.sync_warp();
                     audit(&format!("start engine={} strategy={}", e.engine_id, strat.id));
+                    spawn_verify(engine, &mut e);
                     Response::Status(e.status())
                 }
                 Err(m) => {
                     e.state = RunState::Error;
+                    e.reset_verify();
                     Response::Error { message: m }
                 }
             }
@@ -209,13 +295,15 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
             e.dpi.stop();
             e.running = false;
             e.state = RunState::Idle;
+            e.reset_verify();
             audit("stop");
             Response::Status(e.status())
         }
         Command::Status => Response::Status(e.status()),
-        Command::SetStrategy { id } => {
-            audit(&format!("set_strategy {id}"));
+        Command::SetStrategy { id, repeats_override } => {
+            audit(&format!("set_strategy {id} repeats_override={repeats_override:?}"));
             e.strategy = id;
+            e.repeats_override = repeats_override;
             if e.running {
                 // Force a restart so the new strategy actually takes effect: start() alone is idempotent
                 // and would no-op on a live winws child. Brief (~1s) gap is fine for an explicit change.
@@ -225,8 +313,10 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
                 if let Err(m) = e.dpi.start(&strat, &hl) {
                     e.state = RunState::Error;
                     e.running = false;
+                    e.reset_verify();
                     return Response::Error { message: m };
                 }
+                spawn_verify(engine, &mut e); // new strategy → old handshake result no longer proves anything
             }
             Response::Status(e.status())
         }
@@ -245,9 +335,13 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
                 let strat = e.current_strategy();
                 let hl = e.hostlist.clone();
                 match e.dpi.start(&strat, &hl) {
-                    Ok(()) => e.state = RunState::Active,
+                    Ok(()) => {
+                        e.state = RunState::Active;
+                        spawn_verify(engine, &mut e); // new engine → old handshake result no longer proves anything
+                    }
                     Err(m) => {
                         e.state = RunState::Error;
+                        e.reset_verify();
                         return Response::Error { message: m };
                     }
                 }
@@ -371,7 +465,15 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
             Ok(j) => Response::Data(j),
             Err(m) => Response::Error { message: m },
         },
-        Command::ApplyProfile { id } => apply_profile(&mut e, &id),
+        Command::ApplyProfile { id } => {
+            let r = apply_profile(&mut e, &id);
+            // Desync/local-proxy AND tunnel profiles land here on success (e.running=true) — same
+            // "is it actually working" question applies to both, so probe unconditionally.
+            if e.running && matches!(r, Response::Status(_)) {
+                spawn_verify(engine, &mut e);
+            }
+            r
+        }
         // ---- Preflight / teşhis (docs/07 §8) ----
         Command::Preflight => {
             drop(e);
@@ -416,6 +518,7 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
             e.dpi.stop();
             e.running = false;
             e.state = RunState::Idle;
+            e.reset_verify();
             match crate::rollback::rollback_all() {
                 Ok(()) => Response::Ok,
                 Err(m) => Response::Error { message: m },
@@ -459,6 +562,8 @@ fn apply_profile_obj(e: &mut Engine, prof: &crate::profile::Profile) -> Response
     e.engine_id = engine_id.to_string();
     e.dpi = engine::make_engine_with_params(engine_id, &prof.engine_params);
     e.strategy = if prof.strategy.is_empty() { "auto".into() } else { prof.strategy.clone() };
+    e.repeats_override = None; // profiles carry no override concept — a stale sweep value must not leak in
+
     e.hostlist = prof.hostlist.clone();
     // Split scope → restrict desync to the profile's domains (winws --hostlist); System → catch-all.
     e.hostlist_only = matches!(prof.scope.mode, ScopeMode::Split);
@@ -863,9 +968,11 @@ pub fn serve_blocking() -> io::Result<()> {
                 e.state = RunState::Active;
                 e.sync_warp();
                 audit("auto-start ok (boot koruması açık)");
+                spawn_verify(&engine, &mut e);
             }
             Err(m) => {
                 e.state = RunState::Error;
+                e.reset_verify();
                 audit(&format!("auto-start başarısız (UI Start gönderene dek kapalı): {m}"));
             }
         }
@@ -903,6 +1010,7 @@ pub fn serve_blocking() -> io::Result<()> {
                 if let Err(m) = e.dpi.start(&strat, &hl) {
                     e.running = false;
                     e.state = RunState::Error;
+                    e.reset_verify();
                     audit(&format!("watchdog: motor kayboldu, yeniden başlatılamadı: {m}"));
                 }
                 match e.warp_target() {
@@ -979,6 +1087,39 @@ mod tests {
         e.last_metrics = None;
         e.metrics_at = None;
         assert!(!e.health().healthy, "no metrics → not healthy");
+    }
+
+    /// Proof-of-protection (item: honesty gate): `EngineStatus.verify` must never claim more than the
+    /// state machine actually knows. A fresh engine and a running-but-unverified engine both report
+    /// "unverified", never "verified" — the UI's "applied-unverified must never render as protected"
+    /// invariant depends on this being true at the source, not patched over in the frontend.
+    #[test]
+    fn verify_state_never_claims_protection_it_has_not_earned() {
+        let mut e = Engine::new();
+        assert_eq!(e.status().verify, "unverified");
+        assert_eq!(e.status().verify_reason, "");
+
+        // Engine reports running, but nothing probed it yet → still unverified, not "protected".
+        e.running = true;
+        e.state = RunState::Active;
+        assert_eq!(e.status().verify, "unverified");
+
+        e.verify = VerifyState::Verifying;
+        assert_eq!(e.status().verify, "verifying");
+
+        e.verify = VerifyState::Verified;
+        assert_eq!(e.status().verify, "verified");
+
+        e.verify = VerifyState::Broken("discord.com: TCP: connection reset".into());
+        assert_eq!(e.status().verify, "broken");
+        assert_eq!(e.status().verify_reason, "discord.com: TCP: connection reset");
+
+        // reset_verify (Stop / failed start / failed respawn) must always fall back to Unverified —
+        // a stale "verified" surviving a stop would be exactly the silent-success bug this closes.
+        e.verify_gen = 0;
+        e.reset_verify();
+        assert_eq!(e.verify, VerifyState::Unverified);
+        assert_eq!(e.verify_gen, 1, "generation bumps so an in-flight probe from before the reset is discarded");
     }
 
     /// Item 7.2: apply_profile_obj handles desync, local-proxy, and tunnel profiles. Test env has no

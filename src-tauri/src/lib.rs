@@ -26,6 +26,7 @@ pub mod sys;
 /// Remote test agent (`evorift-testd` binary only — the app never references it).
 pub mod testd;
 pub mod tweak;
+pub mod verify;
 pub mod warp;
 pub mod wiresock;
 
@@ -414,7 +415,9 @@ async fn stop_protection() -> Result<EngineStatus, String> {
 
 #[tauri::command]
 async fn set_strategy(id: String) -> Result<EngineStatus, String> {
-    tauri::async_runtime::spawn_blocking(move || client::command_status(Command::SetStrategy { id }))
+    tauri::async_runtime::spawn_blocking(move || {
+        client::command_status(Command::SetStrategy { id, repeats_override: None })
+    })
         .await
         .map_err(|e| format!("görev hatası: {e}"))?
 }
