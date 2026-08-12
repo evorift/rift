@@ -714,8 +714,7 @@ impl BypassEngine for WinwsEngine {
         };
         let exe = dir.join("winws.exe");
         if !exe.exists() {
-            eprintln!("[evorift][winws] bundle yok ({}) — sim (gerçek bypass yok)", exe.display());
-            return Ok(());
+            return Err(format!("winws.exe bulunamadı ({}) — bundle eksik", exe.display()));
         }
         Self::kill_all();
         clear_stale_windivert();
