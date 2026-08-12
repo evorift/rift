@@ -379,10 +379,12 @@ fn is_valid_domain(d: &str) -> bool {
 // taşı → UI asla bloke olmaz (list_apps/detect_app_domains'in zaten kullandığı desen).
 
 /// IPC komutunu bloke-eden thread havuzunda çalıştırıp `EngineStatus` döndüren async sarmalayıcı.
-async fn status_cmd(cmd: Command, fallback: EngineStatus) -> EngineStatus {
-    tauri::async_runtime::spawn_blocking(move || client::command_status(cmd).unwrap_or(fallback.clone()))
+/// IPC/görev hatası olduğunda `running: true` gibi sahte bir başarı ASLA üretilmez — hata olduğu
+/// gibi çağırana iletilir (bkz. state.svelte.ts toggle() — dönen `running` alanına göre karar verir).
+async fn status_cmd(cmd: Command) -> Result<EngineStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || client::command_status(cmd))
         .await
-        .unwrap_or_default()
+        .map_err(|e| format!("görev hatası: {e}"))?
 }
 
 /// IPC komutunu bloke-eden thread havuzunda çalıştırıp `Ok(())`/`Err` döndüren async sarmalayıcı.
@@ -396,28 +398,18 @@ async fn unit_cmd(cmd: Command) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn protection_status() -> EngineStatus {
-    status_cmd(Command::Status, EngineStatus::default()).await
+async fn protection_status() -> Result<EngineStatus, String> {
+    status_cmd(Command::Status).await
 }
 
 #[tauri::command]
-async fn start_protection() -> EngineStatus {
-    status_cmd(
-        Command::Start,
-        EngineStatus {
-            running: true,
-            strategy: "auto".into(),
-            dns: "cloudflare".into(),
-            engine: "zapret".into(),
-            state: "active".into(),
-        },
-    )
-    .await
+async fn start_protection() -> Result<EngineStatus, String> {
+    status_cmd(Command::Start).await
 }
 
 #[tauri::command]
-async fn stop_protection() -> EngineStatus {
-    status_cmd(Command::Stop, EngineStatus::default()).await
+async fn stop_protection() -> Result<EngineStatus, String> {
+    status_cmd(Command::Stop).await
 }
 
 #[tauri::command]
