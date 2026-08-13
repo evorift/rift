@@ -18,6 +18,127 @@ is unrelated to that milestone.
 | Date | Phase | ISP | Version | Baseline | Result | Live-tweak result | Pass/Fail | Notes |
 |---|---|---|---|---|---|---|---|---|
 | 2026-08-13 | P0-a/b/c validation (pre-V0, v1) | not recorded | 0.1.3 | Not cleanly established — see `docs/HYPOTHESES-INTERNET-CUT.md` "known unknowns" | **FAIL** — turning protection on cut ALL internet (not just target domains); Discord never opened | Not reached — run aborted at the outage | **FAIL** | Recovery only on closing the app (process-bound, no manual cleanup needed). Root cause not yet determined — see `docs/HYPOTHESES-INTERNET-CUT.md` for the ranked candidate list and `docs/DIAGNOSE-INTERNET-CUT.md`/`scripts/capture-state.ps1` for the capture procedure still to be run. |
+| 2026-08-13 | Task 3 acceptance measurements, post Task-1/2 honesty fixes (commits `9dce8b3`,`f61d3be`,`edd6ac9`,`4b5d80f`,`ac123f5`) | user's home network (`sweet home 5`, Public profile) | 0.1.3 | Protection OFF: `discord.com`/`gateway.discord.gg` TLS handshake genuinely times out (~6.2-6.3s); `cdn.discordapp.com` reachable | **PASS (a)** Discord desktop logs in fully under DPI-only, not stuck on "Connecting…". **(b)** toggle gap 212–1743ms (see below). **(c)** confirmed minimum `dpi-desync-repeats`=1, 9/9 handshakes held | Not run this pass | **PASS** (a), data recorded (b)(c) | Single run, one network — not yet confirmed on a second ISP/time per this file's own interpretation rules. Test 2's *first* run falsely reported "no repeats value works" — root cause was a bug in the test script itself (see below), not the product. |
+
+## 2026-08-13 — Task 3 acceptance measurements (post Task 1/2 honesty fixes)
+
+Context: today's mandate was "honesty + measurement, nothing else." Task 1 removed six silent-
+success paths (UI reporting Active unconditionally, IPC failure resolving to `running:true`,
+missing-binary "sim" fallbacks in three engines, a watchdog that discarded a failed respawn
+Result, a hardcoded engine-list fallback). Task 2 added a real TLS-handshake proof-of-protection
+gate (`src-tauri/src/verify.rs`) so the UI can no longer show "Protected" without a live,
+certificate-validated handshake to Discord actually succeeding. This is the first measurement
+run taken with both landed — everything below is real, on the second laptop, via the
+`evorift-remote-testing` harness (`evorift-ctl` only, never a hand-built winws command line).
+
+Engine bundle: `evorift-svc.exe`/`evorift-ctl.exe` built fresh today (`cargo build --release`,
+includes the Task 1/2 fixes); `winws/` bundle already present on the laptop from a prior push,
+byte-identical (sha256-verified) to the local copy.
+
+### (a) Discord desktop — DPI-only
+
+**Baseline (protection OFF), real cert-validated TLS handshake:**
+
+| Target | Result | ms | Note |
+|---|---|---|---|
+| `discord.com` | **FAIL** | 6177 | TLS handshake timeout (TCP connects, DNS resolves — the handshake itself never completes) |
+| `gateway.discord.gg` | **FAIL** | 6348 | Same — this is the WebSocket gateway Discord needs to actually log in |
+| `cdn.discordapp.com` | ok | 366 | Not blocked |
+| `discordapp.net` | n/a | — | DNS does not resolve — looks like a stale/retired domain, not a blocking signal |
+
+**With protection ON** (`evorift-ctl mode dpi` — WARP explicitly forced off — then `evorift-ctl on`, strategy `auto`):
+
+| Target | Result | ms |
+|---|---|---|
+| `discord.com` | ok | 351 |
+| `gateway.discord.gg` | ok | 1548 |
+| `cdn.discordapp.com` | ok | 642 |
+
+**Functional verdict (human-observed, the part TLS numbers can't tell us):** with DPI-only
+protection on, Discord desktop was quit and relaunched, and **logged in fully — not stuck on
+"Connecting…"**. Confirmed directly by the person at the laptop during the hold window.
+
+Job log (`evorift-ctl mode dpi` → `on` → 120s hold → `off`), full teardown reported clean:
+```
+ok evorift-svc pid 9340
+MODE OK -> dpi (warp forced off)
+hostlist: 12 domain gonderildi
+START OK running=true strategy=auto dns=cloudflare
+PROTECTION IS ON (mode=dpi) -- holding 120s. Quit and relaunch Discord now.
+--- teardown ---
+STOP OK running=false
+```
+
+Note: the prepared `scripts/test1-discord.ps1` (auto-installs Discord, applies the mode, launches
+Discord, holds for a human to watch) could not run end-to-end as designed — the laptop's
+`evorift-testd` runs as a Windows service (Session 0), so any GUI process it launches is not
+visible on the interactive desktop, and Discord was not yet installed under the service context's
+profile (it was under `C:\Users\Huseyin\...`, found by searching all profiles). Protection was
+applied via a session-safe variant instead; Discord was quit/relaunched by the person at the
+laptop directly. `test1-discord.ps1`'s `Find-DiscordExe` should be widened to search
+`C:\Users\*\AppData\Local\Discord` for future runs launched through the agent.
+
+### (b) Toggle downtime
+
+`scripts/test3-toggle.ps1`, mode=dpi (WARP off), continuous ICMP probe to `1.1.1.1` at ~100ms
+intervals logged to disk (348 rows captured), 3 reps, gap read off the probe timeline (not
+inferred from before/after snapshots). Raw: `docs/captures/test3-probe.csv`, `test3-result.json`.
+
+| Rep | Direction | Command latency | Network gap |
+|---|---|---|---|
+| 1 | off→on | 20ms | **212ms** |
+| 1 | on→off | 157ms | **749ms** |
+| 2 | off→on | 1691ms | **406ms** |
+| 2 | on→off | 103ms | **740ms** |
+| 3 | off→on | 1743ms | **1168ms** |
+| 3 | on→off | 173ms | **400ms** |
+
+off→on gap: 212–1168ms (avg ~595ms). on→off gap: 400–749ms (avg ~630ms). Command latency itself
+is noisy (20ms–1743ms) and doesn't track the actual network gap — the gap is the real number,
+read from the probe, not the command's own return time.
+
+### (c) Fake-packet minimum (`dpi-desync-repeats` sweep)
+
+**First run gave a false negative — recorded because failed runs are the most valuable data
+point here.** `scripts/test2-repeats-sweep.ps1` swept `evorift-ctl strat c1 --repeats=N` from 1
+to 20 against `www.google.com`/`www.microsoft.com`/`www.cloudflare.com` and reported **zero**
+values held. Every single attempt failed in ~150–400ms with the same generic error. Before
+recording that as a product finding, a baseline check (protection OFF) showed the identical
+failure on all four targets including plain `discord.com` — inconsistent with `gateway.discord.gg`
+and `cdn.discordapp.com` behaving normally elsewhere. Root cause: the script's `Test-TlsHandshake`
+passed a PowerShell scriptblock as the `RemoteCertificateValidationCallback`; .NET's async TLS I/O
+invokes that callback off the PowerShell runspace thread, which throws "There is no Runspace
+available to run scripts in this thread" — failing every handshake regardless of what was actually
+happening on the wire. Fixed in `scripts/test1-discord.ps1` and `scripts/test2-repeats-sweep.ps1`
+by dropping the accept-any callback and using real certificate validation instead (methodologically
+better anyway — it also catches a substituted DPI/MITM certificate, which accept-any would mask).
+
+**Re-run with the fix:**
+```
+strat c1 --repeats=1 (sweep)    -> all 3 targets ok (253ms, 374ms, 266ms)
+strat c1 --repeats=1 (confirm1) -> all 3 targets ok (556ms, 562ms, 166ms)
+strat c1 --repeats=1 (confirm2) -> all 3 targets ok (171ms, 435ms, 169ms)
+confirmed minimum repeats = 1 (3/3 runs held)
+```
+
+**Confirmed minimum `dpi-desync-repeats` = 1**, verified twice (9/9 individual TLS handshakes
+succeeded). Raw: `docs/captures/test2-sweep.csv`, `test2-result.json`.
+
+### Caveats (per this file's own interpretation rules)
+
+- Single run, one network, one point in time. Not yet repeated on a different ISP or at a
+  different time — do not read this as "solved."
+- `repeats=1` being sufficient is itself a signal worth double-checking on a second network:
+  an unusually low minimum can mean the strategy is working well, or that this specific
+  network's blocking is lighter than the target this strategy was tuned against.
+- The Test 2 script bug above is a reminder that a measurement claiming "it doesn't work" needs
+  the same scrutiny as one claiming "it works" — both were wrong today until traced to a cause.
+- Deadman check: the laptop's controller link dropped twice during this session (DHCP moved its
+  address mid-run, once from `.18`→`.24`, once `.24`→`.20` — the harness's known "both machines'
+  leases moved on the same day" failure class) and the deadman fired several times, but cross-
+  checked against `deadman.log` timestamps, none of the fires overlap the four jobs whose data is
+  recorded above (test3, the corrected test2, the protected-Discord TLS check, the human-verified
+  Discord session) — all fired in the reconnect gaps between jobs, not during one.
 
 ## Prepared run: P0-a/b/c validation (2026-08-13, not yet executed)
 
