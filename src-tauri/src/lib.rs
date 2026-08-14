@@ -32,6 +32,17 @@ pub mod wiresock;
 
 use ipc::{Command, EngineStatus, Response};
 use serde::Serialize;
+
+/// Set at startup when the app has NO IPC backend at all (no embedded server started and no running
+/// EvoriftSvc). Read by the `backend_missing` command so the UI can state the cause plainly instead
+/// of letting every protection command fail separately with an unrelated-looking error.
+static BACKEND_MISSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True when protection commands cannot possibly work because no IPC backend is running.
+#[tauri::command]
+fn backend_missing() -> bool {
+    BACKEND_MISSING.load(std::sync::atomic::Ordering::Relaxed)
+}
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, WindowEvent};
@@ -984,7 +995,10 @@ pub fn run() {
         // Release: service owns the pipe — don't compete.
         false
     } else if svc_state == "stopped" {
-        // Release: service installed but not running — try to start it.
+        // Release: service installed but not running — try to start it. NOTE: `sc start` can never
+        // succeed if the service is set to Disabled (a state svcctl::status() also reports as
+        // "stopped"), so the result is checked rather than assumed; a failed start falls through to
+        // the embedded server instead of leaving the app with no backend at all.
         if process_is_elevated() {
             let _ = hidden_command("sc").args(["start", svcctl::SERVICE_NAME]).output();
             std::thread::sleep(std::time::Duration::from_millis(800));
@@ -1002,6 +1016,19 @@ pub fn run() {
                 eprintln!("[evorift] gömülü sunucu başlamadı (EvoriftSvc çalışıyor olabilir): {e}");
             }
         });
+    }
+
+    // State honesty: if we neither started the embedded server NOR have a running service, there is
+    // NO IPC backend — every command will fail with a cryptic per-call error and the user is left
+    // guessing why nothing works (exactly how a stale/disabled service presented in testing). Record
+    // it once, up front, so the UI can say "no backend" instead of surfacing ten unrelated failures.
+    if !want_embedded && svcctl::status() != "running" {
+        BACKEND_MISSING.store(true, std::sync::atomic::Ordering::Relaxed);
+        eprintln!(
+            "[evorift] UYARI: IPC arka ucu YOK (servis '{svc_state}', gömülü sunucu açılmadı, \
+             elevated={}). Koruma komutlarının hiçbiri çalışmayacak.",
+            process_is_elevated()
+        );
     }
 
     tauri::Builder::default()
@@ -1128,6 +1155,7 @@ pub fn run() {
             verify_manifest,
             find_discord_path,
             runtime_mode,
+            backend_missing,
             service_status,
             install_service,
             uninstall_service,

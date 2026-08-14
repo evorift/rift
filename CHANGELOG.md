@@ -23,6 +23,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - _Nothing yet._
 
+## [0.1.4] - 2026-08-14
+
+### Added
+
+- Four protection modes named for what they do (Light / Strong / Autopilot / VPN), replacing the
+  raw engine and strategy pickers.
+- The app now says plainly when its protection backend isn't running, instead of letting every
+  action fail with a separate unrelated-looking error.
+
+### Changed
+
+- Language follows your Windows display language on first run; picking one by hand still wins.
+- "Checking…" is now shown as its own state, distinct from "not verified" — an in-progress check
+  no longer looks identical to one that gave up.
+- The protection check now runs its three targets in parallel, so a blocked connection gets a
+  verdict in seconds rather than up to half a minute.
+- Advanced network settings, per-app settings and speed limits are visibly disabled ("Yakında")
+  rather than present but unreliable.
+
+### Fixed
+
+- The portable download shipped without the bypass engine or tunnel binaries, so it could never
+  actually protect anything.
+- Version number bumped to 0.1.4: 0.1.3 was built more than once with different contents, so a
+  stale installer was indistinguishable from a current one.
+
 ## [0.1.3] - 2026-08-14
 
 ### Added

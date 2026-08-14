@@ -1,6 +1,6 @@
 [package]
 name = "evorift"
-version = "0.1.3"
+version = "0.1.4"
 description = "Unblock Discord, Roblox & games without a VPN (Windows DPI-bypass)."
 authors = ["evorift"]
 edition = "2021"

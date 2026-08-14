@@ -26,22 +26,42 @@ pub struct ProbeOutcome {
     pub reason: String,
 }
 
-/// `PROBE_TARGETS`'ın tümünü sırayla dener (arka plan thread'inde birkaç saniye sürer, paralelliğe
-/// gerek yok). `MIN_OK` kadarı tam TLS handshake + sertifika doğrulamasını geçerse Ok.
+/// Hedefleri PARALEL dener (hedef başına bir thread). `MIN_OK` kadarı tam TLS handshake +
+/// sertifika doğrulamasını geçerse Ok.
+///
+/// Eskiden sıralıydı ve "paralelliğe gerek yok" diyordu — engelli bir hatta bu YANLIŞTI: engellenen
+/// her hedef IO_TIMEOUT kadar bekliyor, 3 hedef ardışık olunca sonuç ~18-36 sn sürüyordu. O süre
+/// boyunca UI hiçbir şey bilmiyor ("kontrol ediliyor"da asılı kalıyor) — yani en çok engelin olduğu,
+/// yani sonucun en çok önemli olduğu durumda en yavaş cevabı veriyordu. Paralelde toplam süre en
+/// yavaş TEK hedefe (~IO_TIMEOUT) iner; sonuç/quorum mantığı birebir aynı kalır.
 pub fn probe_discord() -> ProbeOutcome {
     let roots = match load_roots() {
         Ok(r) => r,
         Err(e) => return ProbeOutcome { ok: false, reason: format!("kök sertifika deposu yüklenemedi: {e}") },
     };
+
+    let handles: Vec<_> = PROBE_TARGETS
+        .iter()
+        .map(|host| {
+            let roots = Arc::clone(&roots);
+            std::thread::spawn(move || (*host, probe_one(host, &roots)))
+        })
+        .collect();
+
     let mut ok_count = 0usize;
     let mut first_failure = String::new();
-    for host in PROBE_TARGETS {
-        match probe_one(host, &roots) {
-            Ok(()) => ok_count += 1,
-            Err(e) if first_failure.is_empty() => first_failure = format!("{host}: {e}"),
+    for h in handles {
+        // Bir prob thread'i panikleyerek sonucu kaybederse bunu "geçti" saymak sessiz başarı olur;
+        // başarısızlık olarak say ve nedenini yaz.
+        match h.join() {
+            Ok((_, Ok(()))) => ok_count += 1,
+            Ok((host, Err(e))) if first_failure.is_empty() => first_failure = format!("{host}: {e}"),
+            Ok((_, Err(_))) => {}
+            Err(_) if first_failure.is_empty() => first_failure = "prob thread'i çöktü".into(),
             Err(_) => {}
         }
     }
+
     if ok_count >= MIN_OK {
         ProbeOutcome { ok: true, reason: String::new() }
     } else {
@@ -111,6 +131,31 @@ mod tests {
     /// A live TLS handshake belongs in evorift-live-verification, not a unit test — but the quorum
     /// arithmetic (MIN_OK against PROBE_TARGETS) is pure and must stay coherent: MIN_OK <= len, and
     /// > half so one target's transient failure can't silently satisfy "verified" alone.
+    /// Live probe, on purpose NOT part of the normal suite (`#[ignore]`): it hits the real network
+    /// and its result depends on the line under test. Run it by hand when the UI is stuck on
+    /// "Doğrulanmadı" and you need to know whether the probe finishes at all, and how long it takes:
+    ///     cargo test --release --lib verify:: -- --ignored --nocapture
+    /// Needs no service, no IPC and no elevation — unlike evorift-ctl, whose embedded manifest
+    /// forces a UAC prompt (build.rs) and so can't be driven from a non-interactive shell.
+    #[test]
+    #[ignore = "live network probe — run explicitly, see evorift-live-verification"]
+    fn live_probe_reports_timing_and_outcome() {
+        for host in PROBE_TARGETS {
+            let roots = load_roots().expect("root store");
+            let t = std::time::Instant::now();
+            let r = probe_one(host, &roots);
+            println!("  {host}: {:?} in {}ms", r.as_ref().map(|_| "ok"), t.elapsed().as_millis());
+        }
+        let t = std::time::Instant::now();
+        let out = probe_discord();
+        println!(
+            "TOTAL ok={} in {}ms reason={}",
+            out.ok,
+            t.elapsed().as_millis(),
+            if out.reason.is_empty() { "-" } else { &out.reason }
+        );
+    }
+
     #[test]
     fn quorum_is_coherent_with_the_target_list() {
         assert!(!PROBE_TARGETS.is_empty());
