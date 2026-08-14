@@ -255,6 +255,37 @@ const DEFAULT_HOSTLIST: &[&str] = &[
     "youtube.com", "googlevideo.com",
 ];
 
+// ============================================================================================
+// Protection-mode tuning.
+//
+// ⚠ THESE TWO REPEAT VALUES ARE PROVISIONAL — NOT MEASURED. Do not treat them as tuned.
+// The ONLY dpi-desync-repeats value ever actually measured is 1, and that sweep
+// (docs/LIVE-VERIFICATION.md, 2026-08-13 (c)) ran against www.google.com / www.microsoft.com /
+// www.cloudflare.com — NEVER against Discord, and never against the catch-all path. 6 and 8 are
+// picked as conservative middle ground between that single data point and the engine's own
+// long-standing c1 default of 11. Anyone tuning these later: re-run the sweep against the real
+// target set first, per mode, and record it in LIVE-VERIFICATION.md before changing them here.
+// ============================================================================================
+
+/// "Hafif Koruma" — Discord + Roblox only, hostlist-gated. DEFAULT MODE on first run.
+const HAFIF_REPEATS: u32 = 6;
+
+/// "Güçlü Koruma" — catch-all (no --hostlist, every TLS/443 flow desynced).
+///
+/// Uses the SAME desync chain as the hostlist path: engine.rs's build_args only appends
+/// `--hostlist=` to each profile group when hostlist_only is set, so catch-all and gated mode are
+/// byte-identical apart from that one flag. No separate chain is needed for either mode.
+const GUCLU_REPEATS: u32 = 8;
+
+/// Hafif Koruma's hostlist: Discord + Roblox only, per the shipped scope. Kept deliberately small —
+/// each entry is a per-connection lookup in winws, and a broad list goes stale. Users needing wider
+/// coverage switch to Güçlü Koruma (catch-all) rather than growing this.
+const HAFIF_HOSTLIST: &[&str] = &[
+    "discord.com", "discordapp.com", "discord.gg", "discordapp.net", "discord.media",
+    "gateway.discord.gg", "cdn.discordapp.com",
+    "roblox.com", "www.roblox.com", "rbxcdn.com",
+];
+
 fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
     if let Err(m) = ipc::validate(&cmd) {
         audit(&format!("REJECT {cmd:?}: {m}"));
@@ -360,13 +391,22 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
         },
         Command::SetDns { profile } => {
             audit(&format!("set_dns {profile}"));
-            e.dns = profile.clone();
-            crate::rollback::record(Change::DnsChanged);
-            let status = e.status();
+            // State honesty: apply FIRST, commit to Engine state only on success. This used to set
+            // e.dns and snapshot e.status() before run_dns() ran, so a failed DNS change left the
+            // engine (and every later Command::Status) reporting a provider that was never applied.
             drop(e);
             match crate::dns::run_dns(&profile) {
-                Ok(()) => Response::Status(status),
-                Err(m) => Response::Error { message: m },
+                Ok(()) => {
+                    crate::rollback::record(Change::DnsChanged);
+                    let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+                    e.dns = profile.clone();
+                    audit(&format!("set_dns ok (uygulandı): {profile}"));
+                    Response::Status(e.status())
+                }
+                Err(m) => {
+                    audit(&format!("set_dns BAŞARISIZ (durum değişmedi): {m}"));
+                    Response::Error { message: m }
+                }
             }
         }
         Command::ResetDns => {
@@ -452,6 +492,63 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
                 }
             } else {
                 Response::Ok
+            }
+        }
+        Command::SetProtectionMode { mode } => {
+            audit(&format!("set_protection_mode {mode}"));
+            // Snapshot everything this command touches, so a failed apply can roll the Engine back
+            // to exactly what it was rather than leaving a half-applied mode reported as active.
+            let prev = (e.strategy.clone(), e.repeats_override, e.hostlist_only, e.hostlist.clone());
+
+            match mode.as_str() {
+                "hafif" => {
+                    e.strategy = "c1".into();
+                    e.repeats_override = Some(HAFIF_REPEATS);
+                    e.hostlist_only = true;
+                    e.hostlist = HAFIF_HOSTLIST.iter().map(|s| s.to_string()).collect();
+                }
+                "guclu" => {
+                    e.strategy = "c1".into();
+                    e.repeats_override = Some(GUCLU_REPEATS);
+                    // Catch-all: hostlist_only=false means winws gets NO --hostlist flag, so every
+                    // TLS/443 flow is desynced (engine.rs build_args). The hostlist field is left
+                    // populated but unused — it only matters when hostlist_only is true.
+                    e.hostlist_only = false;
+                }
+                _ => return Response::Error { message: format!("geçersiz koruma modu: {mode}") },
+            }
+
+            if !e.running {
+                // Nothing to verify yet — the mode is recorded and takes effect on the next Start.
+                return Response::Status(e.status());
+            }
+
+            // Live switch: restart so winws actually picks up the new args (start() is idempotent
+            // and would no-op against a live child), then re-probe — the previous mode's Verified
+            // result says nothing about this one.
+            e.dpi.stop();
+            let strat = e.current_strategy();
+            let hl = e.hostlist.clone();
+            match e.dpi.start(&strat, &hl) {
+                Ok(()) => {
+                    e.running = true;
+                    e.state = RunState::Active;
+                    spawn_verify(engine, &mut e);
+                    Response::Status(e.status())
+                }
+                Err(m) => {
+                    // Roll the settings back so status() keeps describing the mode that is actually
+                    // loaded, not the one we failed to switch to.
+                    e.strategy = prev.0;
+                    e.repeats_override = prev.1;
+                    e.hostlist_only = prev.2;
+                    e.hostlist = prev.3;
+                    e.running = false;
+                    e.state = RunState::Error;
+                    e.reset_verify();
+                    audit(&format!("set_protection_mode BAŞARISIZ, geri alındı: {m}"));
+                    Response::Error { message: m }
+                }
             }
         }
         // ---- Profil sistemi (docs/07 §4) ----
@@ -1107,6 +1204,70 @@ mod tests {
         e.reset_verify();
         assert_eq!(e.verify, VerifyState::Unverified);
         assert_eq!(e.verify_gen, 1, "generation bumps so an in-flight probe from before the reset is discarded");
+    }
+
+    /// The two shipped protection modes must map onto the winws arg builder the way the UI claims:
+    /// Hafif = hostlist-gated to Discord+Roblox at HAFIF_REPEATS, Güçlü = catch-all (NO --hostlist)
+    /// at GUCLU_REPEATS. Asserted through the real Strategy → build_args path so a change to either
+    /// mode's wiring fails here instead of shipping a label that overstates its scope.
+    #[cfg(windows)]
+    #[test]
+    fn protection_modes_produce_the_scope_the_ui_promises() {
+        let winws = crate::engine::make_engine("zapret");
+
+        // --- Hafif: gated to the Discord + Roblox list ---
+        let mut e = Engine::new();
+        e.strategy = "c1".into();
+        e.repeats_override = Some(HAFIF_REPEATS);
+        e.hostlist_only = true;
+        e.hostlist = HAFIF_HOSTLIST.iter().map(|s| s.to_string()).collect();
+        let hafif = winws.build_args(&e.current_strategy(), &e.hostlist);
+        assert!(
+            hafif.iter().any(|a| a.starts_with("--hostlist=")),
+            "Hafif must gate by hostlist — otherwise it silently covers everything"
+        );
+        assert!(
+            hafif.iter().any(|a| a == &format!("--dpi-desync-repeats={HAFIF_REPEATS}")),
+            "Hafif must use HAFIF_REPEATS on the primary TLS stage"
+        );
+        assert!(
+            HAFIF_HOSTLIST.contains(&"discord.com") && HAFIF_HOSTLIST.contains(&"roblox.com"),
+            "Hafif's scope is Discord + Roblox"
+        );
+        assert!(
+            !HAFIF_HOSTLIST.iter().any(|d| d.contains("youtube")),
+            "Hafif must NOT quietly widen beyond the scope its label promises"
+        );
+
+        // --- Güçlü: catch-all, same desync chain, only the gating differs ---
+        let mut g = Engine::new();
+        g.strategy = "c1".into();
+        g.repeats_override = Some(GUCLU_REPEATS);
+        g.hostlist_only = false;
+        g.hostlist = HAFIF_HOSTLIST.iter().map(|s| s.to_string()).collect(); // populated but unused
+        let guclu = winws.build_args(&g.current_strategy(), &g.hostlist);
+        assert!(
+            !guclu.iter().any(|a| a.starts_with("--hostlist=")),
+            "Güçlü is catch-all: a --hostlist flag here would silently narrow it"
+        );
+        assert!(
+            guclu.iter().any(|a| a == &format!("--dpi-desync-repeats={GUCLU_REPEATS}")),
+            "Güçlü must use GUCLU_REPEATS on the primary TLS stage"
+        );
+
+        // Both modes ride the SAME desync chain — only --hostlist and the repeat count differ. If
+        // that ever stops holding, the modes need separate configs and this assumption must be revisited.
+        let strip = |v: &Vec<String>| -> Vec<String> {
+            v.iter()
+                .filter(|a| !a.starts_with("--hostlist=") && !a.starts_with("--dpi-desync-repeats="))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            strip(&hafif),
+            strip(&guclu),
+            "hostlist gating and repeat count must be the ONLY difference between the two modes"
+        );
     }
 
     /// Item 7.2: apply_profile_obj handles desync, local-proxy, and tunnel profiles. Test env has no

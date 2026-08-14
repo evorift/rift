@@ -47,6 +47,11 @@ pub enum Command {
     SetHostlist { domains: Vec<String> },
     SetAppModes { modes: Vec<(String, String, String)> },
     SetFullWarp { enable: bool },
+    /// User-facing protection mode ("hafif" | "guclu"). ONE atomic command that sets strategy,
+    /// repeats, hostlist and hostlist-gating together, restarts the engine if it was running, and
+    /// re-runs the proof-of-protection probe. Deliberately not four separate commands: the UI must
+    /// never show a mode as active because three of four sub-settings landed.
+    SetProtectionMode { mode: String },
 
     // ---- Blueprint genişletmesi (docs/07) — yeni orkestrasyon komutları ----
     /// Aktif DPI motorunu değiştir ("zapret" | "byedpi" | "goodbyedpi"). Çalışıyorsa yeniden başlatır.
@@ -221,6 +226,13 @@ pub fn validate(cmd: &Command) -> Result<(), String> {
             }
         }
         Command::SetHostlist { domains } => valid_domains(domains),
+        Command::SetProtectionMode { mode } => {
+            if matches!(mode.as_str(), "hafif" | "guclu") {
+                Ok(())
+            } else {
+                Err(format!("geçersiz koruma modu: {mode}"))
+            }
+        }
         Command::SetAppModes { modes } => {
             if modes.len() > 500 {
                 return Err("çok fazla uygulama (en fazla 500)".into());

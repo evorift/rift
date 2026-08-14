@@ -413,6 +413,13 @@ async fn stop_protection() -> Result<EngineStatus, String> {
     status_cmd(Command::Stop).await
 }
 
+/// Switch the user-facing protection mode ("hafif" | "guclu"). Returns the REAL post-switch status
+/// (including the verify state), so the UI can gate "active" on what actually landed.
+#[tauri::command]
+async fn set_protection_mode(mode: String) -> Result<EngineStatus, String> {
+    status_cmd(Command::SetProtectionMode { mode }).await
+}
+
 #[tauri::command]
 async fn set_strategy(id: String, repeats_override: Option<u32>) -> Result<EngineStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -685,6 +692,58 @@ async fn uninstall_service() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(svcctl::uninstall)
         .await
         .map_err(|e| format!("görev hatası: {e}"))?
+}
+
+/// Uninstall evorift: undo everything it changed on this machine, then hand off to the Windows
+/// uninstaller. Deliberately low-friction — the UI asks once and this does the rest; there is no
+/// "are you sure you want to leave", no retention offer, no partial "keep my settings" branch.
+///
+/// Order matters: system changes are reverted BEFORE the service is removed, because the rollback
+/// log is replayed through the service (DNS, firewall rules, tweaks, tunnel). Losing the service
+/// first would strand those changes on the machine with nothing left able to undo them. Rollback
+/// failure is reported but does NOT abort the uninstall: a user who asked to uninstall must not be
+/// trapped in the app because one revert step failed — the message tells them what to check.
+#[tauri::command]
+async fn uninstall_app(app: tauri::AppHandle) -> Result<(), String> {
+    let mut problems: Vec<String> = Vec::new();
+
+    if let Err(m) = unit_cmd(Command::RollbackAll).await {
+        problems.push(format!("sistem değişiklikleri geri alınamadı: {m}"));
+    }
+    if let Err(m) = tauri::async_runtime::spawn_blocking(svcctl::uninstall)
+        .await
+        .map_err(|e| format!("görev hatası: {e}"))?
+    {
+        problems.push(format!("servis kaldırılamadı: {m}"));
+    }
+
+    // NSIS (perMachine) drops uninstall.exe next to the installed exe. If it isn't there the app is
+    // most likely running from the portable zip or a dev build, where there is nothing to uninstall
+    // — say so plainly instead of silently doing nothing.
+    let uninstaller = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("uninstall.exe")))
+        .filter(|p| p.exists());
+
+    match uninstaller {
+        Some(path) => {
+            std::process::Command::new(&path)
+                .spawn()
+                .map_err(|e| format!("kaldırıcı başlatılamadı: {e}"))?;
+            app.exit(0); // release our own files so the uninstaller can delete them
+            Ok(())
+        }
+        None => {
+            let mut msg = String::from(
+                "Kaldırıcı bulunamadı (taşınabilir sürüm veya geliştirme derlemesi olabilir). \
+                 Sistem değişiklikleri geri alındı; klasörü elle silebilirsin.",
+            );
+            if !problems.is_empty() {
+                msg.push_str(&format!(" Ayrıca: {}", problems.join("; ")));
+            }
+            Err(msg)
+        }
+    }
 }
 
 /// Create a support bundle ZIP (logs + system summary) and return the path.
@@ -1030,6 +1089,7 @@ pub fn run() {
             start_protection,
             stop_protection,
             set_strategy,
+            set_protection_mode,
             set_dns,
             block_app,
             run_repair,
@@ -1071,6 +1131,7 @@ pub fn run() {
             service_status,
             install_service,
             uninstall_service,
+            uninstall_app,
             start_svc,
             stop_svc,
             restart_engine,
