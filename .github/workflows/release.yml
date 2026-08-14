@@ -175,8 +175,16 @@ jobs:
 
       # ---- Assemble release artifacts ----
 
-      # Portable zip: the standalone UI exe plus the WinDivert DLL + signed driver
-      # so the app can be run without the installer (run as Administrator).
+      # Portable zip: the standalone UI exe plus EVERY runtime resource the installer ships.
+      #
+      # This used to copy only evorift.exe + WinDivert + evorift-svc.exe and OMIT the winws/ and
+      # warp/ trees, so the portable build could never start the DPI engine or the tunnel:
+      # WinwsEngine::bundle_dir() resolves to <exe dir>\winws (engine.rs), which simply didn't
+      # exist. Before today's honesty fixes that failed quietly; now it surfaces as "mode switch
+      # failed" / "tunnel didn't come up", which is how the gap was finally noticed.
+      #
+      # The layout MUST mirror tauri.conf.json's bundle.resources mapping, because both the
+      # installed and portable builds resolve resources relative to the exe in exactly the same way.
       - name: Build portable zip
         shell: pwsh
         run: |
@@ -190,6 +198,15 @@ jobs:
           Copy-Item -Force "src-tauri/resources/WinDivert64.sys" "$stage/WinDivert64.sys"
           # The privileged service ships in the portable bundle too so DPI works.
           Copy-Item -Force "src-tauri/resources/evorift-svc.exe" "$stage/evorift-svc.exe"
+          # winws/ (DPI engine + WinDivert + filters + fake payloads) and warp/ (tunnel) —
+          # without these the portable build is a UI with no engine behind it.
+          Copy-Item -Recurse -Force "src-tauri/resources/winws" "$stage/winws"
+          Copy-Item -Recurse -Force "src-tauri/resources/warp"  "$stage/warp"
+
+          # Fail the build rather than publish an engine-less portable zip again.
+          foreach ($need in @("evorift.exe", "evorift-svc.exe", "winws/winws.exe", "winws/WinDivert64.sys")) {
+            if (-not (Test-Path "$stage/$need")) { throw "portable bundle incomplete: missing $need" }
+          }
 
           New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
           $zip = "artifacts/evorift-portable-$version-x64.zip"
