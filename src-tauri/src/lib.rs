@@ -414,9 +414,9 @@ async fn stop_protection() -> Result<EngineStatus, String> {
 }
 
 #[tauri::command]
-async fn set_strategy(id: String) -> Result<EngineStatus, String> {
+async fn set_strategy(id: String, repeats_override: Option<u32>) -> Result<EngineStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        client::command_status(Command::SetStrategy { id, repeats_override: None })
+        client::command_status(Command::SetStrategy { id, repeats_override })
     })
         .await
         .map_err(|e| format!("görev hatası: {e}"))?

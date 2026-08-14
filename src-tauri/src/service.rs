@@ -270,6 +270,12 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
             if e.dns.is_empty() {
                 e.dns = "cloudflare".into();
             }
+            if e.hostlist.is_empty() {
+                // Used to be seeded by the removed boot-auto-protect block (P0-e fix, 2026-08-14) --
+                // an explicit Start is now the only path in, so it has to seed this itself, same
+                // fallback shape as strategy/dns just above.
+                e.hostlist = DEFAULT_HOSTLIST.iter().map(|s| s.to_string()).collect();
+            }
             let strat = e.current_strategy();
             let hostlist = e.hostlist.clone();
             match e.dpi.start(&strat, &hostlist) {
@@ -953,34 +959,15 @@ pub fn serve_blocking() -> io::Result<()> {
     crate::profile::seed_defaults();
     audit("listening");
 
-    // Boot auto-protect (servis çalışıyor = korumalı). Panik servis döngüsünü düşürmesin (fail-safe).
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
-        e.state = RunState::Applying;
-        e.strategy = "auto".into();
-        e.dns = "cloudflare".into();
-        e.hostlist = DEFAULT_HOSTLIST.iter().map(|s| s.to_string()).collect();
-        let strat = e.current_strategy();
-        let hl = e.hostlist.clone();
-        match e.dpi.start(&strat, &hl) {
-            Ok(()) => {
-                e.running = true;
-                e.state = RunState::Active;
-                e.sync_warp();
-                audit("auto-start ok (boot koruması açık)");
-                spawn_verify(&engine, &mut e);
-            }
-            Err(m) => {
-                e.state = RunState::Error;
-                e.reset_verify();
-                audit(&format!("auto-start başarısız (UI Start gönderene dek kapalı): {m}"));
-            }
-        }
-        drop(e);
-        if let Err(m) = crate::dns::run_dns("cloudflare") {
-            audit(&format!("auto-start DNS uygulanamadı: {m}"));
-        }
-    }));
+    // P0-e fix (2026-08-14): protection used to boot-auto-start unconditionally here (servis
+    // çalışıyor = korumalı), with no persisted preference to gate it and no way for `off` to
+    // survive a service/process restart — Command::Stop only ever touched the in-memory Engine
+    // this serve_blocking() call owns, so the NEXT invocation (reboot, crash+SCM-restart, a fresh
+    // --console run) always came back up protected regardless of what the user last chose. Opt-in
+    // is the smaller fix (no new persistence layer to build and get right tonight): protection now
+    // starts ONLY on an explicit Command::Start, same as `Engine::new()`'s own default of
+    // running=false/state=Idle a few lines up. See also state.svelte.ts's autoProtect flag.
+    audit("listening idle (boot auto-protect kapalı — P0-e, kullanıcı Start demeden korumaya geçmez)");
 
     // winws watchdog + per-app off PID exclusion (5 sn). Paused durumda (Auto-Pilot) dokunma.
     {

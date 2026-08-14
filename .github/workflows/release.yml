@@ -304,14 +304,16 @@ jobs:
           body_path: ${{ steps.notes.outputs.notes_file }}
           draft: false
           prerelease: false
-          # NOTE: kept false on purpose. This repo does NOT yet configure the Tauri
-          # updater plugin (no plugins.updater in tauri.conf.json, no
-          # tauri-plugin-updater dep, no bundle.createUpdaterArtifacts), so
-          # `tauri build` emits NO *.sig / *-setup.nsis.zip and the latest.json is
-          # synthesized rather than produced by Tauri. Those updater globs therefore
-          # match zero files; with fail_on_unmatched_files: true the publish step
-          # would hard-fail. false lets the always-present artifacts (installer,
-          # portable zip, SHA256SUMS, synthesized latest.json) publish cleanly.
+          # NOTE: kept false on purpose. The updater IS configured (plugins.updater in
+          # tauri.conf.json, tauri-plugin-updater in Cargo.toml, registered in lib.rs) but its
+          # artifact generation is off (bundle.createUpdaterArtifacts:false, tauri.conf.json)
+          # and the frontend no longer calls check() at all (see +layout.svelte) -- a broken
+          # signature chain is worse than no updater, so it's fully disabled for this MVP, not
+          # just unwired. `tauri build` therefore emits NO *.sig / *-setup.nsis.zip and the
+          # latest.json is synthesized rather than produced by Tauri. Those updater globs
+          # match zero files; with fail_on_unmatched_files: true the publish step would
+          # hard-fail. false lets the always-present artifacts (installer, portable zip,
+          # SHA256SUMS, synthesized latest.json) publish cleanly.
           fail_on_unmatched_files: false
           files: |
             artifacts/*-setup.exe
