@@ -138,10 +138,18 @@ impl Engine {
         s
     }
 
+    /// Does anything actually need the WARP tunnel right now?
+    ///
+    /// FIXED 2026-08-14 (live test): this used to `return true` when `app_modes` was EMPTY — the
+    /// default state on a fresh install and in every DPI-only mode. So plain "Hafif Koruma"
+    /// (Discord+Roblox desync, no tunnel anywhere in its description) brought up a full WireGuard
+    /// tunnel on every single Start. Combined with `sync_warp()` running under the engine mutex and
+    /// `run_hidden()` having had no timeout, one slow `wireguard.exe /installtunnelservice` froze
+    /// the whole service — which is what left the UI stuck on "Bağlanıyor" in EVERY mode.
+    ///
+    /// Empty now means "nothing asked for a tunnel", which is the honest reading: the tunnel is
+    /// opt-in (VPN mode sets `full_warp`, or a per-app entry explicitly selects "warp").
     fn want_warp(&self) -> bool {
-        if self.app_modes.is_empty() {
-            return true;
-        }
         self.app_modes.values().any(|(m, _)| m == "warp")
     }
 
@@ -1268,6 +1276,37 @@ mod tests {
             strip(&guclu),
             "hostlist gating and repeat count must be the ONLY difference between the two modes"
         );
+    }
+
+    /// REGRESSION (2026-08-14 live test): a DPI-only protection start must NEVER ask for a WARP
+    /// tunnel. `want_warp()` used to return true whenever `app_modes` was empty — the default on a
+    /// fresh install — so plain "Hafif Koruma" ran `wireguard.exe /installtunnelservice` on every
+    /// Start, under the engine mutex, with no timeout on the child. One slow tunnel install then
+    /// froze the entire service and the UI sat on "Bağlanıyor" forever, in every mode.
+    ///
+    /// The tunnel is opt-in: only `full_warp` (VPN mode) or an explicit per-app "warp" entry.
+    #[test]
+    fn dpi_only_start_never_asks_for_a_tunnel() {
+        let mut e = Engine::new();
+        assert!(e.app_modes.is_empty(), "fresh engine has no per-app modes");
+        assert!(!e.want_warp(), "empty app_modes must NOT mean 'everyone wants a tunnel'");
+        assert_eq!(e.warp_target(), None, "DPI-only start must not touch the tunnel at all");
+
+        // Per-app "dpi"/"off" entries are still not a tunnel request.
+        e.app_modes.insert("a".into(), ("dpi".into(), String::new()));
+        e.app_modes.insert("b".into(), ("off".into(), String::new()));
+        assert!(!e.want_warp());
+        assert_eq!(e.warp_target(), None);
+
+        // An explicit per-app "warp" entry IS a request — split tunnel (full = false).
+        e.app_modes.insert("c".into(), ("warp".into(), String::new()));
+        assert!(e.want_warp());
+        assert_eq!(e.warp_target(), Some(false));
+
+        // VPN mode overrides everything → full tunnel.
+        let mut v = Engine::new();
+        v.full_warp = true;
+        assert_eq!(v.warp_target(), Some(true), "VPN mode must still bring the tunnel up");
     }
 
     /// Item 7.2: apply_profile_obj handles desync, local-proxy, and tunnel profiles. Test env has no

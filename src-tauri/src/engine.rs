@@ -452,8 +452,17 @@ impl BypassEngine for SimEngine {
 // Bundle: evorift-svc.exe yanındaki `winws\` klasörü. Job Object: servis ölünce kernel winws'i öldürür.
 // ============================================================================
 /// Eski/yabancı WinDivert ÇEKİRDEK SÜRÜCÜSÜNÜ temizle. Windows tek global WinDivert.sys yükler;
-/// farklı sürüm yüklüyse winws anında ölür. Güvenli sıra: DURDUR → STOPPED doğrula → ANCAK O ZAMAN sil
-/// (çalışırken `sc delete` → DELETE_PENDING limbo'su, durum kötüleşir). Best-effort + sessiz.
+/// farklı sürüm yüklüyse winws anında ölür.
+///
+/// Sıra: DISABLED ise demand-start'a al → DURDUR → STOPPED yokla → HER DURUMDA sil.
+///
+/// REVİZE (2026-08-14, canlı test): eskiden yalnız STOPPED doğrulanırsa siliyordu. Sürücüyü açık
+/// tutan canlı bir winws.exe varken `sc stop` çalışmaz → silme hiç denenmezdi → bozuk kayıt HER
+/// yeniden başlatmada hayatta kalır ve motoru kalıcı olarak çalışmaz hale getirir. Gerçekte
+/// görülen hal buydu: iki gün önceki bir debug ağacından kalma, START_TYPE=DISABLED bir kayıt.
+/// Çalışırken silmek DELETE_PENDING (1072) üretir ve reboot'ta temizlenir — kullanılamaz bir kaydı
+/// süresiz bırakmaktan iyidir. Silmek her hâlükârda güvenli: winws sonraki başlatmada kendi
+/// bundle'ından doğru yol + doğru start type ile yeniden kaydeder. Best-effort.
 ///
 /// Module-level and `pub` because the remote test agent (`testd::recovery`) fires the exact same
 /// cleanup from its deadman switch. One implementation, two callers — a second copy over there
@@ -473,6 +482,11 @@ pub fn clear_stale_windivert() {
         if !sc(&["query", name]).contains("STATE") {
             continue;
         }
+        // A registration left at START_TYPE=DISABLED can never be started, so winws can never load
+        // it — and `sc stop` on a disabled service does nothing useful either. Put it back to
+        // demand-start FIRST so the stop below can actually take effect. Seen in the wild: a stale
+        // dev-tree registration stuck DISABLED made every winws launch fail instantly.
+        let _ = sc(&["config", name, "start=", "demand"]);
         // Best-effort: a stop that fails is still followed by the STOPPED poll below, which is
         // what actually gates the delete — the stop's own exit code adds nothing.
         let _ = sc(&["stop", name]);
@@ -485,10 +499,18 @@ pub fn clear_stale_windivert() {
                 break;
             }
         }
-        if stopped {
-            // Best-effort: if the delete fails the driver is at least STOPPED, which is enough for
-            // winws to load its own version; surfacing an error here has no recovery path.
-            let _ = sc(&["delete", name]);
+        // Delete even when the stop did NOT succeed. A loaded driver with a live handle-holder
+        // cannot be stopped, and the previous "only delete if stopped" rule meant the bad
+        // registration survived every restart — the exact state that bricks the engine. `sc delete`
+        // on a running driver marks it for deletion (error 1072) and it goes away on reboot, which
+        // still beats leaving a permanently unusable entry in place. Deleting is safe regardless:
+        // winws recreates the service from its own bundle on next start.
+        let out = sc(&["delete", name]);
+        if !stopped && !out.contains("SUCCESS") {
+            eprintln!(
+                "[evorift][windivert] '{name}' kaydi temizlenemedi (surec handle tutuyor olabilir); \
+                 winws yuklenemeyebilir — scripts/FIX-WINDIVERT.bat yonetici olarak calistirilmali"
+            );
         }
     }
 }

@@ -43,15 +43,45 @@ fn command_once(cmd: &Command) -> Result<Response, String> {
     ipc::read_msg::<Response>(&mut reader)
 }
 
+/// Bir IPC çağrısının ÜST SINIRI. Servis tarafında en uzun iş (motor yeniden başlatma + WARP alt
+/// süreçleri) bunun altında kalmalı; aşarsa yanıt beklemek yerine dürüst bir hata döndürmek daha
+/// iyidir — sonsuza dek dönen bir spinner kullanıcıya hiçbir şey söylemiyor.
+const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// `command_once`, ama ZAMAN AŞIMLI.
+///
+/// FIXED 2026-08-14 (canlı test): pipe akışının (interprocess `Stream`) okuma/yazma zaman aşımı
+/// YOK ve `read_msg` düz bloke eden bir `read_line`. Servis tarafı bir kez kilitlenirse (bkz.
+/// warp.rs run_hidden) istemci sonsuza dek bekliyor, `await invoke(...)` hiç çözülmüyor ve UI
+/// "Bağlanıyor"da asılı kalıyordu — hata bile göstermeden. İş ayrı bir thread'de yürütülür ve
+/// kanaldan zaman aşımlı okunur; süre dolarsa çağıran serbest kalır.
+fn command_once_bounded(cmd: &Command) -> Result<Response, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let c = cmd.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(command_once(&c)); // alıcı gitmişse hata yutulur (zaman aşımı olmuş demektir)
+    });
+    match rx.recv_timeout(CALL_TIMEOUT) {
+        Ok(r) => r,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "servis {}s içinde yanıt vermedi (kilitlenmiş olabilir)",
+            CALL_TIMEOUT.as_secs()
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("servis çağrısı beklenmedik şekilde sonlandı".into())
+        }
+    }
+}
+
 /// Servise tek komut gönder, yanıtı döndür.
 /// On REJECT (token stale — service restarted and wrote a new token) retries once
 /// after a short pause so a single service restart doesn't surface as a UI error.
 pub fn command(cmd: Command) -> Result<Response, String> {
-    match command_once(&cmd) {
+    match command_once_bounded(&cmd) {
         Err(e) if e.contains("reddedildi") || e.contains("rejected") => {
             // The service may have restarted and written a new token. Re-read and retry once.
             std::thread::sleep(std::time::Duration::from_millis(150));
-            command_once(&cmd)
+            command_once_bounded(&cmd)
         }
         r => r,
     }

@@ -455,21 +455,73 @@ impl WarpEngine {
     }
 
     /// Konsol penceresi AÇMADAN komut çalıştır; başarısızsa stderr ile Err döndür.
+    /// Her WARP alt-sürecinin ÜST SINIRI. `wgcf register/generate` ağa çıkar (ve bu uygulamanın
+    /// hedefi tam da ağın kurcalandığı hatlar), `wireguard.exe /installtunnelservice` ise Windows
+    /// servisi kurar — ikisi de gerçek hayatta asılabiliyor.
+    const CHILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+
+    /// Alt süreci çalıştır — ZAMAN AŞIMLI.
+    ///
+    /// FIXED 2026-08-14 (canlı test): eskiden düz `cmd.output()` idi, yani SINIRSIZ bekleme. Bu
+    /// fonksiyon `sync_warp()` üzerinden engine mutex'i TUTULURKEN çağrıldığı için, asılan tek bir
+    /// çocuk süreç tüm servisi kalıcı olarak kilitliyordu: sonraki her `dispatch()` aynı kilitte
+    /// bloke oluyor, IPC istemcisinin de zaman aşımı olmadığı için UI sonsuza dek "Bağlanıyor"da
+    /// kalıyordu. Artık süre dolarsa çocuk öldürülür ve hata döner — kilit her hâlükârda bırakılır.
     #[cfg(windows)]
     fn run_hidden(
         program: &std::path::Path,
         args: &[String],
         cwd: Option<&std::path::Path>,
     ) -> Result<(), String> {
+        Self::run_hidden_timeout(program, args, cwd, Self::CHILD_TIMEOUT)
+    }
+
+    /// `run_hidden`'ın zaman aşımı parametreli hâli — testler kısa bir süre verip öldürme yolunu
+    /// gerçekten çalıştırabilsin diye ayrıldı (25 sn bekleyen bir test işe yaramaz).
+    #[cfg(windows)]
+    fn run_hidden_timeout(
+        program: &std::path::Path,
+        args: &[String],
+        cwd: Option<&std::path::Path>,
+        timeout: std::time::Duration,
+    ) -> Result<(), String> {
         use std::os::windows::process::CommandExt;
         let mut cmd = std::process::Command::new(program);
-        cmd.args(args).creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        cmd.args(args)
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         if let Some(d) = cwd {
             cmd.current_dir(d);
         }
-        let out = cmd
-            .output()
+        let mut child = cmd
+            .spawn()
             .map_err(|e| format!("{} çalıştırılamadı: {e}", program.display()))?;
+
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(format!(
+                            "{} {}s içinde yanıt vermedi — süreç sonlandırıldı",
+                            program.display(),
+                            timeout.as_secs()
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => return Err(format!("{} beklenemedi: {e}", program.display())),
+            }
+        }
+        // Süreç bitti → boruları okumak artık bloke etmez.
+        let out = child
+            .wait_with_output()
+            .map_err(|e| format!("{} çıktısı okunamadı: {e}", program.display()))?;
         if out.status.success() {
             Ok(())
         } else {
@@ -504,6 +556,39 @@ mod tests {
     use super::*;
 
     const SAMPLE: &str = "[Interface]\nPrivateKey = AAAA\nAddress = 172.16.0.2/32\nAddress = 2606:4700:110:8::/128\nDNS = 1.1.1.1\nMTU = 1280\n\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\nAllowedIPs = 0.0.0.0/0\nAllowedIPs = ::/0\nEndpoint = engage.cloudflareclient.com:2408\n";
+
+    /// REGRESSION (2026-08-14 live test): every WARP child process must be bounded.
+    ///
+    /// `run_hidden` used a plain `cmd.output()` — an UNBOUNDED wait — and is called from
+    /// `sync_warp()` while the service holds the engine mutex. One `wireguard.exe` or `wgcf.exe`
+    /// that never returned therefore froze the whole service permanently: every later dispatch
+    /// blocked on the same lock, and with no client-side timeout the UI hung on "Bağlanıyor"
+    /// forever without so much as an error. This drives the real kill path with a short deadline
+    /// against a genuinely long-running child, and asserts we give up rather than wait for it.
+    #[cfg(windows)]
+    #[test]
+    fn a_hanging_child_is_killed_at_its_timeout() {
+        // ping -n 30 127.0.0.1 ≈ 29s — far longer than the 1s deadline below.
+        let ping = std::path::PathBuf::from("ping");
+        let t0 = std::time::Instant::now();
+        let r = WarpEngine::run_hidden_timeout(
+            &ping,
+            &["-n".to_string(), "30".to_string(), "127.0.0.1".to_string()],
+            None,
+            std::time::Duration::from_secs(1),
+        );
+        let waited = t0.elapsed();
+
+        assert!(r.is_err(), "a child that outlives its deadline must be an error, not a success");
+        assert!(
+            r.unwrap_err().contains("yanıt vermedi"),
+            "the error must say it timed out, so the cause is visible in logs"
+        );
+        assert!(
+            waited < std::time::Duration::from_secs(10),
+            "must return at the deadline (~1s), not wait for the child; waited {waited:?}"
+        );
+    }
 
     #[test]
     fn split_tunnel_replaces_allowed_ips_endpoint_and_drops_dns() {
