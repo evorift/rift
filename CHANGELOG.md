@@ -23,6 +23,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - _Nothing yet._
 
+## [0.1.3] - 2026-08-14
+
+### Added
+
+- Real proof-of-protection: "Protected" now requires an actual TLS handshake to succeed, not
+  just the engine process staying alive.
+- A protection-mode selector on the dashboard (autopilot placeholder, light/strong presets,
+  alternate engine when bundled).
+
+### Changed
+
+- Protection no longer auto-starts on app/service launch — it only starts when you ask it to.
+- GoodbyeDPI/ByeDPI controls in Control Panel are hidden instead of shown-but-non-functional
+  when their engine isn't bundled in this build.
+- The auto-updater is fully disabled for this release (its signature chain isn't set up yet —
+  no update check runs, rather than one that would silently fail).
+
+### Fixed
+
+- Several places where a failed or missing engine could be silently reported as "running" —
+  the app now shows the actual state, including a distinct error state.
+
+### Security
+
+- _Nothing yet._
+
 ## [0.1.2] - 2026-06-11
 
 ### Added
