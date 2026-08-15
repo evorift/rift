@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - _Nothing yet._
 
+## [0.1.7] - 2026-08-15
+
+### Fixed
+
+- **Protection kept dropping out.** The engine was being restarted every few seconds in the
+  background, killing connections mid-flight, and secure DNS could silently revert without the app
+  noticing. Both are fixed; measured stable with no restarts over sustained use.
+- **Sites that stayed blocked in Strong Protection now open.** The bypass method (not its strength)
+  was the problem for the toughest domains; Strong Protection now uses a method verified to get
+  them through — 400/400 successful connections across four blocked sites, zero failures.
+
 ## [0.1.6] - 2026-08-15
 
 ### Fixed

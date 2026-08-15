@@ -458,7 +458,11 @@ impl WarpEngine {
     /// Her WARP alt-sürecinin ÜST SINIRI. `wgcf register/generate` ağa çıkar (ve bu uygulamanın
     /// hedefi tam da ağın kurcalandığı hatlar), `wireguard.exe /installtunnelservice` ise Windows
     /// servisi kurar — ikisi de gerçek hayatta asılabiliyor.
-    const CHILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+    /// 10s, NOT longer: WarpEngine::start() makes two of these calls back to back and the watchdog
+    /// still holds the engine lock across them, so the worst case must stay well under the IPC
+    /// client's 45s ceiling — otherwise a slow tunnel install starves every other command and the
+    /// UI reports "servis yanit vermedi" (seen live on 2026-08-15).
+    const CHILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
     /// Alt süreci çalıştır — ZAMAN AŞIMLI.
     ///

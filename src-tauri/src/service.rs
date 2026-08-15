@@ -278,12 +278,18 @@ const DEFAULT_HOSTLIST: &[&str] = &[
 /// "Hafif Koruma" — Discord + Roblox only, hostlist-gated. DEFAULT MODE on first run.
 const HAFIF_REPEATS: u32 = 6;
 
-/// "Güçlü Koruma" — catch-all (no --hostlist, every TLS/443 flow desynced).
+/// "Güçlü Koruma" — catch-all (no --hostlist, every TLS/443 flow desynced), using the desync chain
+/// that was MEASURED to open the hardest domains on a real blocked line (2026-08-15).
 ///
-/// Uses the SAME desync chain as the hostlist path: engine.rs's build_args only appends
-/// `--hostlist=` to each profile group when hostlist_only is set, so catch-all and gated mode are
-/// byte-identical apart from that one flag. No separate chain is needed for either mode.
-const GUCLU_REPEATS: u32 = 8;
+/// A 14-config sweep found this to be the only preset that got the hard domains through: TTL-based
+/// desync (fake + ttl 1 + autottl 3). Every c1 repeat count (8/11/20) left them at 0% while keeping
+/// the control target at 100%, which is what ruled out repeat-count tuning as the answer. Verified
+/// afterwards at 400/400 under 50s of sustained load, no engine restarts.
+///
+/// The preset id names an ISP only because that is where it was originally derived; here it is
+/// simply "the chain that measurably works". Evidence is from ONE line — picking this per-line is
+/// what Autopilot is meant to automate.
+const GUCLU_STRATEGY: &str = "turkcell-hotspot";
 
 /// Hafif Koruma's hostlist: Discord + Roblox only, per the shipped scope. Kept deliberately small —
 /// each entry is a per-connection lookup in winws, and a broad list goes stale. Users needing wider
@@ -541,8 +547,26 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
                     e.hostlist = HAFIF_HOSTLIST.iter().map(|s| s.to_string()).collect();
                 }
                 "guclu" => {
-                    e.strategy = "c1".into();
-                    e.repeats_override = Some(GUCLU_REPEATS);
+                    // MEASURED, not guessed (2026-08-15, laptop). A 14-config sweep against the
+                    // domains that were failing 100% of the time found exactly ONE that opened
+                    // them: this preset's TTL-based desync (fake + ttl 1 + autottl 3). Every c1
+                    // variant (repeats 8/11/20), plain `fake`, and `superonline` left the hard
+                    // domains at 0% while keeping the control target at 100% — so the failure was
+                    // the desync method, not the repeat count. `multidisorder`, `tt`, `tt-alt` and
+                    // `kablonet` were worse still: 0% on the control target too.
+                    //
+                    // Verified under load afterwards: 400/400 (100%) across pornhub.com,
+                    // brazzers.com, xvideos.com and discord.com over 50s, no winws restarts.
+                    //
+                    // NOTE the preset id names an ISP because that is where it was first derived;
+                    // it is used here purely as "the desync chain that measurably works", and the
+                    // evidence is from ONE line. Another line may well need a different one — that
+                    // per-line choice is exactly what Autopilot is meant to make automatically.
+                    e.strategy = GUCLU_STRATEGY.into();
+                    // NO repeats override: the configuration that scored 400/400 ran with the
+                    // preset's own value. Forcing a repeat count here would ship something other
+                    // than what was actually measured.
+                    e.repeats_override = None;
                     // Catch-all: hostlist_only=false means winws gets NO --hostlist flag, so every
                     // TLS/443 flow is desynced (engine.rs build_args). The hostlist field is left
                     // populated but unused — it only matters when hostlist_only is true.
@@ -1102,7 +1126,23 @@ pub fn serve_blocking() -> io::Result<()> {
     // winws watchdog + per-app off PID exclusion (5 sn). Paused durumda (Auto-Pilot) dokunma.
     {
         let engine = Arc::clone(&engine);
-        std::thread::spawn(move || loop {
+        std::thread::spawn(move || {
+        // STABILITY (2026-08-15): exclusion changes RESTART winws (there is no filter hot-reload —
+        // see WinwsEngine::set_exclusion, which kills the child so the watchdog respawns it with
+        // new args). The exclusion set is built from the LIVE SOURCE PORTS of every app in "off"
+        // mode, and source ports churn constantly as those apps open connections. So with even one
+        // active "off" app, this loop tore the engine down and rebuilt it EVERY 5 SECONDS, and
+        // every connection in flight died with it. That is the reported "works, then stops, then
+        // works" behaviour: the bypass was fine, it was just never allowed to stay up.
+        //
+        // Restarts driven by exclusion churn are now rate-limited. A missed port for a few seconds
+        // only means one "off" app briefly keeps being bypassed — a far smaller harm than dropping
+        // every connection on the machine. Respawn-if-the-engine-died is NOT rate-limited: that
+        // path must stay immediate, and it is idempotent when the child is alive.
+        const EXCL_MIN_INTERVAL: Duration = Duration::from_secs(60);
+        let mut last_excl_change: Option<std::time::Instant> = None;
+        let mut last_dns_heal: Option<std::time::Instant> = None;
+        loop {
             std::thread::sleep(Duration::from_secs(5));
             let (running, paused, off_paths) = {
                 let e = engine.lock().unwrap_or_else(|p| p.into_inner());
@@ -1116,30 +1156,134 @@ pub fn serve_blocking() -> io::Result<()> {
             } else {
                 crate::pid_scan::ExclusionPorts::default()
             };
-            let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
-            if e.running && e.state != RunState::Paused {
-                e.dpi.set_exclusion(&excl);
-                let strat = e.current_strategy();
-                let hl = e.hostlist.clone();
-                // Respawn Result'ı ASLA at ma — çocuk süreç kayıp ve yeniden başlatılamıyorsa (bundle
-                // silindi/kilitlendi) running:true yalan söylemeye devam eder (bkz. evorift-remote-testing:
-                // "silent success is the enemy").
-                if let Err(m) = e.dpi.start(&strat, &hl) {
-                    e.running = false;
-                    e.state = RunState::Error;
-                    e.reset_verify();
-                    audit(&format!("watchdog: motor kayboldu, yeniden başlatılamadı: {m}"));
+            // SCOPED on purpose. std::sync::Mutex is NOT reentrant: this guard must be dropped
+            // before the WARP and DNS blocks below take the lock again, or the watchdog deadlocks
+            // against itself on its very first tick and holds the engine lock forever — every
+            // dispatch() then blocks and the whole service is dead 5 seconds after start. That is
+            // exactly what an unscoped `let mut e = engine.lock()` here caused.
+            {
+                let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+                if e.running && e.state != RunState::Paused {
+                    // Only push a new exclusion set when it actually differs AND we haven't just
+                    // restarted for the same reason. set_exclusion() is a no-op on an unchanged set,
+                    // so an unchanged set costs nothing and never trips the timer.
+                    let may_change = last_excl_change
+                        .map(|t| t.elapsed() >= EXCL_MIN_INTERVAL)
+                        .unwrap_or(true);
+                    if may_change {
+                        if e.dpi.exclusion_differs(&excl) {
+                            last_excl_change = Some(std::time::Instant::now());
+                            audit("watchdog: exclusion degisti — winws yeniden baslatiliyor");
+                        }
+                        e.dpi.set_exclusion(&excl);
+                    }
+                    let strat = e.current_strategy();
+                    let hl = e.hostlist.clone();
+                    // Respawn Result'ı ASLA at ma — çocuk süreç kayıp ve yeniden başlatılamıyorsa (bundle
+                    // silindi/kilitlendi) running:true yalan söylemeye devam eder (bkz. evorift-remote-testing:
+                    // "silent success is the enemy").
+                    if let Err(m) = e.dpi.start(&strat, &hl) {
+                        e.running = false;
+                        e.state = RunState::Error;
+                        e.reset_verify();
+                        audit(&format!("watchdog: motor kayboldu, yeniden başlatılamadı: {m}"));
+                    }
                 }
-                match e.warp_target() {
-                    Some(full) if !e.warp.is_running() => {
-                        let _ = e.warp.start(full);
+            }
+
+            // ---- WARP reconciliation, OUTSIDE the engine lock -------------------------------
+            // This used to run inside the `if e.running` block above, holding the guard. WarpEngine
+            // ::start() shells out to wireguard.exe twice (/uninstalltunnelservice then
+            // /installtunnelservice, each bounded at CHILD_TIMEOUT=25s), so a slow tunnel install
+            // could hold the engine mutex for ~50s. Every dispatch() blocks on that same lock, so a
+            // single mode switch then failed with "servis 45s içinde yanıt vermedi" — observed
+            // live, and previously (before the client timeout existed) it hung forever instead.
+            //
+            // Decide under the lock, act without it: only the cheap state read needs exclusivity.
+            let warp_action = {
+                let e = engine.lock().unwrap_or_else(|p| p.into_inner());
+                if e.running && e.state != RunState::Paused {
+                    match e.warp_target() {
+                        Some(full) if !e.warp.is_running() => Some(Some(full)),
+                        None if e.warp.is_running() => Some(None),
+                        _ => None,
                     }
-                    None if e.warp.is_running() => {
-                        e.warp.stop();
+                } else {
+                    None
+                }
+            };
+            if let Some(target) = warp_action {
+                let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+                // Re-check under the lock: the target may have changed while we were unlocked.
+                match (target, e.warp_target()) {
+                    (Some(full), Some(want)) if want == full && !e.warp.is_running() => {
+                        if let Err(m) = e.warp.start(full) {
+                            audit(&format!("watchdog: warp baslatilamadi: {m}"));
+                        }
                     }
+                    (None, None) if e.warp.is_running() => e.warp.stop(),
                     _ => {}
                 }
             }
+
+            // ---- DNS drift self-heal -------------------------------------------------------
+            // We only ever recorded the DNS we APPLIED; we never re-read the adapters. Anything
+            // that changes them behind our back — another network tool, a VPN client, Windows, a
+            // user, or (as seen in testing) an external recovery script — leaves the service
+            // reporting dns=cloudflare while the machine has silently gone back to the ISP
+            // resolver. On a line that sinkholes Discord that is fatal but nearly invisible: the
+            // engine is fine, the strategy is fine, and every connection still dies at TCP because
+            // the address itself is wrong. The user sees "Uygulandı ama çalışmıyor" and no reason.
+            //
+            // So when protection is running and the proof-of-protection probe says BROKEN, check
+            // whether DNS drifted; if it did, re-apply it and re-probe. Only on Broken (not on
+            // every tick) so the cost is paid solely when something is already wrong, and
+            // rate-limited so a genuinely blocked line can't turn into a DNS-reapply loop.
+            let needs_dns_check = {
+                let e = engine.lock().unwrap_or_else(|p| p.into_inner());
+                e.running
+                    && matches!(e.verify, VerifyState::Broken(_))
+                    && !e.dns.is_empty()
+                    && e.dns != "auto"
+            };
+            let may_heal = last_dns_heal
+                .map(|t: std::time::Instant| t.elapsed() >= Duration::from_secs(60))
+                .unwrap_or(true);
+            if needs_dns_check && may_heal {
+                let want = {
+                    let e = engine.lock().unwrap_or_else(|p| p.into_inner());
+                    e.dns.clone()
+                };
+                // NEVER hold the engine lock across this: verify_dns/run_dns shell out to
+                // PowerShell across every adapter and can take seconds (see the warp.rs freeze).
+                let actual = crate::dns::verify_dns();
+                let drifted = !actual.secure
+                    || !actual.provider.eq_ignore_ascii_case(match want.as_str() {
+                        "cloudflare" => "Cloudflare",
+                        "quad9" => "Quad9",
+                        "adguard" => "AdGuard",
+                        "google" => "Google",
+                        _ => "",
+                    });
+                if drifted {
+                    last_dns_heal = Some(std::time::Instant::now());
+                    audit(&format!(
+                        "DNS kaymis (beklenen {want}, gerçek [{}]) — yeniden uygulanıyor",
+                        actual.servers.join(", ")
+                    ));
+                    match crate::dns::run_dns(&want) {
+                        Ok(()) => {
+                            audit("DNS yeniden uygulandı — doğrulama tekrar çalıştırılıyor");
+                            let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+                            if e.running {
+                                spawn_verify(&engine, &mut e);
+                            }
+                        }
+                        Err(m) => audit(&format!("DNS yeniden uygulanamadı: {m}")),
+                    }
+                }
+            }
+        }
         });
     }
 
@@ -1240,9 +1384,13 @@ mod tests {
     }
 
     /// The two shipped protection modes must map onto the winws arg builder the way the UI claims:
-    /// Hafif = hostlist-gated to Discord+Roblox at HAFIF_REPEATS, Güçlü = catch-all (NO --hostlist)
-    /// at GUCLU_REPEATS. Asserted through the real Strategy → build_args path so a change to either
-    /// mode's wiring fails here instead of shipping a label that overstates its scope.
+    /// Hafif = hostlist-gated to Discord+Roblox, Güçlü = catch-all (NO --hostlist) using the
+    /// MEASURED desync chain. Asserted through the real Strategy → build_args path so a change to
+    /// either mode's wiring fails here instead of shipping a label that overstates its scope.
+    ///
+    /// The two modes no longer share one chain: Güçlü switched to the TTL-based preset after a
+    /// sweep showed it was the only configuration that opened the hardest domains (400/400 under
+    /// load, 2026-08-15) while every c1 repeat count left them at 0%.
     #[cfg(windows)]
     #[test]
     fn protection_modes_produce_the_scope_the_ui_promises() {
@@ -1272,10 +1420,10 @@ mod tests {
             "Hafif must NOT quietly widen beyond the scope its label promises"
         );
 
-        // --- Güçlü: catch-all, same desync chain, only the gating differs ---
+        // --- Güçlü: catch-all, TTL-based desync (the measured winner) ---
         let mut g = Engine::new();
-        g.strategy = "c1".into();
-        g.repeats_override = Some(GUCLU_REPEATS);
+        g.strategy = GUCLU_STRATEGY.into();
+        g.repeats_override = None; // the 400/400 run used the preset's own value — do not override
         g.hostlist_only = false;
         g.hostlist = HAFIF_HOSTLIST.iter().map(|s| s.to_string()).collect(); // populated but unused
         let guclu = winws.build_args(&g.current_strategy(), &g.hostlist);
@@ -1283,23 +1431,17 @@ mod tests {
             !guclu.iter().any(|a| a.starts_with("--hostlist=")),
             "Güçlü is catch-all: a --hostlist flag here would silently narrow it"
         );
+        // The TTL knobs ARE the reason this config beats the hard domains — losing them silently
+        // would take the hard sites back to 0% while everything still looked fine.
         assert!(
-            guclu.iter().any(|a| a == &format!("--dpi-desync-repeats={GUCLU_REPEATS}")),
-            "Güçlü must use GUCLU_REPEATS on the primary TLS stage"
+            guclu.iter().any(|a| a.starts_with("--dpi-desync-ttl=")) ||
+            guclu.iter().any(|a| a.starts_with("--dpi-desync-autottl=")),
+            "Güçlü's measured config is TTL-based; without a ttl/autottl arg it is not that config"
         );
-
-        // Both modes ride the SAME desync chain — only --hostlist and the repeat count differ. If
-        // that ever stops holding, the modes need separate configs and this assumption must be revisited.
-        let strip = |v: &Vec<String>| -> Vec<String> {
-            v.iter()
-                .filter(|a| !a.starts_with("--hostlist=") && !a.starts_with("--dpi-desync-repeats="))
-                .cloned()
-                .collect()
-        };
-        assert_eq!(
-            strip(&hafif),
-            strip(&guclu),
-            "hostlist gating and repeat count must be the ONLY difference between the two modes"
+        assert_ne!(
+            crate::engine::strategy_by_id(GUCLU_STRATEGY).desync,
+            "",
+            "Güçlü's strategy id must resolve to a real preset, not fall through to an empty one"
         );
     }
 

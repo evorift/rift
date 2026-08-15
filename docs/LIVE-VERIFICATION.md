@@ -21,6 +21,86 @@ is unrelated to that milestone.
 | 2026-08-15 | MVP UI freeze + DNS root-cause (0.1.5) | user's home network | 0.1.4→0.1.5 | Protection stuck on "Bağlanıyor/test edilmedi" in every mode; ISP resolver answers Discord with sinkhole 195.175.254.2 | **PASS** — freeze fixed (start 1038ms, mode switch 1898ms, verify settles); DNS now actually applied → **hafif verified in 31ms, güçlü verified in 19ms** | Not run this pass | **PASS** | Two independent causes: (1) DPI-only started a WARP tunnel under the engine lock with no child timeout → whole service froze; (2) `Command::Start` reported `dns=cloudflare` without applying it, so Discord resolved to a sinkhole and no strategy could work. Repeats 6/8 still UNMEASURED — DNS masked all four configs. Single line, single run. |
 | 2026-08-13 | Task 3 acceptance measurements, post Task-1/2 honesty fixes (commits `9dce8b3`,`f61d3be`,`edd6ac9`,`4b5d80f`,`ac123f5`) | user's home network (`sweet home 5`, Public profile) | 0.1.3 | Protection OFF: `discord.com`/`gateway.discord.gg` TLS handshake genuinely times out (~6.2-6.3s); `cdn.discordapp.com` reachable | **PASS (a)** Discord desktop logs in fully under DPI-only, not stuck on "Connecting…". **(b)** toggle gap 212–1743ms (see below). **(c)** confirmed minimum `dpi-desync-repeats`=1, 9/9 handshakes held | Not run this pass | **PASS** (a), data recorded (b)(c) | Single run, one network — not yet confirmed on a second ISP/time per this file's own interpretation rules. Test 2's *first* run falsely reported "no repeats value works" — root cause was a bug in the test script itself (see below), not the product. |
 
+## 2026-08-15 (night) — instability root-caused; hard domains opened; Güçlü retuned (0.1.7)
+
+User report: Discord and some blocked sites worked in Güçlü, but not reliably — the UI kept
+flipping to "Uygulandı ama çalışmıyor". Measured with a purpose-built harness (N attempts per
+target over a fixed window, `winws` PID sampled every second so a restart can't be mistaken for a
+bypass failure), against ISP-blocked targets — unblocked hosts prove nothing about a bypass.
+
+### Three independent causes of the flapping
+
+1. **The engine restarted every 5 seconds.** `set_exclusion` kills the winws child whenever the
+   excluded-port set changes, and that set is built from the LIVE SOURCE PORTS of every app in
+   "off" mode — which churn constantly. With 39 app modes synced (new apps default to "off"), the
+   watchdog tore the engine down and rebuilt it on a 5s beat, killing every in-flight connection.
+   Exclusion-driven restarts are now rate-limited to once a minute; crash-respawn stays immediate.
+2. **DNS silently reverted.** The service recorded the DNS it applied and never re-read the
+   adapters. Caught red-handed: service reporting `dns=cloudflare` while the machine was on
+   `192.168.1.1` with `discord.com → 195.175.254.2`. On a sinkholing line that is fatal but nearly
+   invisible — the engine and strategy are fine and every connection still dies at TCP. Now
+   re-checked and re-applied when the verify probe reports Broken.
+3. **The service wedged on tunnel work.** The watchdog held the engine mutex while running
+   `wireguard.exe` (two calls, each bounded at 25s), so a mode switch failed with
+   "servis 45s içinde yanıt vermedi". WARP reconciliation moved outside the lock; child timeout
+   cut to 10s so two calls stay well under the IPC ceiling.
+
+Self-inflicted, recorded for honesty: the first attempt at fix (2) called `engine.lock()` while the
+watchdog already held the guard. `std::sync::Mutex` is not reentrant, so the watchdog deadlocked
+against itself on its first tick and wedged the service 5s after every start — every command,
+including `status`, timed out. Fixed by scoping the guard.
+
+### Result: flapping → deterministic
+
+| Target | Before (guclu/c1) | After fixes (guclu/c1) |
+|---|---|---|
+| xvideos.com | — | **100/100** |
+| discord.com | — | **100/100** |
+| pornhub.com | — | 0/23 (`tls timeout`) |
+| brazzers.com | — | 0/23 (`tls timeout`) |
+
+`winws` PID: **no changes**, failures spread evenly across all 5s buckets. So this was no longer
+instability — two domains passed 100% and two failed 100%, which is a tuning problem, not a race.
+
+### Strategy sweep: it was never the repeat count
+
+14 configs, 8 attempts per target, with a known-good control target so a config that simply breaks
+everything can't look like progress:
+
+| Config | Hard domains | Control |
+|---|---|---|
+| c1 r8 / r11 / r20 | 0% | 100% |
+| fake, fake r20 | 0% | 100% |
+| superonline | 0% | 100% |
+| multidisorder, multidisorder r11, tt, tt-alt, superonline-alt, kablonet | 0% | **0%** (worse) |
+| **turkcell-hotspot** | **100% (16/16)** | **100%** |
+
+Every c1 repeat count failed identically, which rules out repeat-count tuning as the answer — the
+difference is the DESYNC METHOD: `fake + ttl 1 + autottl 3` (TTL-based; the fake packet expires
+before the real server but the DPI box still sees it).
+
+### Güçlü Koruma retuned + verified as shipped
+
+`GUCLU_STRATEGY = "turkcell-hotspot"`, no repeats override (the measured run used the preset's own
+value). Verified by selecting the mode the way a user does — `protmode guclu`, nothing else — so
+this tests the shipped code path, not a hand-applied config:
+
+```
+PROTMODE OK -> guclu (strategy=turkcell-hotspot)   verify=verified
+pornhub.com   100/100  ort 201ms
+brazzers.com  100/100  ort 201ms
+xvideos.com   100/100  ort 216ms
+discord.com   100/100  ort 184ms
+TOPLAM        400/400 = 100%     winws restarts: 0, errors per 5s bucket: 0
+```
+
+**Caveats.** ONE line, one session. The winning preset names an ISP because that is where it was
+derived — another line may need a different chain, and choosing it per-line is precisely what
+Autopilot is for. HAFIF_REPEATS (6) remains unmeasured; the sweep only tested the catch-all path.
+VPN/WARP still unfixed and untested. Also: the test agent's deadman fired 21 times today and its
+recovery kills winws AND resets DNS, so part of the originally reported instability was the harness
+rather than the product — its window was widened from 120s to 3600s for manual testing.
+
 ## 2026-08-15 (evening) — the INSTALLED build verified end to end (0.1.6)
 
 Everything below the previous entry was tested by running `evorift-svc.exe --console` out of the

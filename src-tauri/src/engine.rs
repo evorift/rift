@@ -235,6 +235,14 @@ pub trait BypassEngine: Send {
     /// "Off" modlu uygulamaların PID source port'ları — WinDivert capture filter'ından hariç tutulur.
     /// Liste değişince motor kendini yeniden başlatabilir. Boş → catch-all (regresyon yok).
     fn set_exclusion(&mut self, _excl: &ExclusionPorts) {}
+    /// Would `set_exclusion(excl)` actually change anything (i.e. cause a RESTART)?
+    ///
+    /// Lets the watchdog rate-limit exclusion-driven restarts without having to guess: applying an
+    /// unchanged set is free, applying a changed one costs every live connection. Default false so
+    /// engines that ignore exclusions never report a spurious change.
+    fn exclusion_differs(&self, _excl: &ExclusionPorts) -> bool {
+        false
+    }
 }
 
 /// Aktif motoru id ile üret (factory, docs/07 §3). Bilinmeyen id / Windows dışı → SimEngine.
@@ -771,6 +779,9 @@ impl BypassEngine for WinwsEngine {
     }
     fn is_running(&self) -> bool {
         self.child.is_some()
+    }
+    fn exclusion_differs(&self, excl: &ExclusionPorts) -> bool {
+        &self.excl != excl
     }
     fn set_exclusion(&mut self, excl: &ExclusionPorts) {
         if &self.excl == excl {
