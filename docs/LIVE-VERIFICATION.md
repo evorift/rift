@@ -21,6 +21,67 @@ is unrelated to that milestone.
 | 2026-08-15 | MVP UI freeze + DNS root-cause (0.1.5) | user's home network | 0.1.4→0.1.5 | Protection stuck on "Bağlanıyor/test edilmedi" in every mode; ISP resolver answers Discord with sinkhole 195.175.254.2 | **PASS** — freeze fixed (start 1038ms, mode switch 1898ms, verify settles); DNS now actually applied → **hafif verified in 31ms, güçlü verified in 19ms** | Not run this pass | **PASS** | Two independent causes: (1) DPI-only started a WARP tunnel under the engine lock with no child timeout → whole service froze; (2) `Command::Start` reported `dns=cloudflare` without applying it, so Discord resolved to a sinkhole and no strategy could work. Repeats 6/8 still UNMEASURED — DNS masked all four configs. Single line, single run. |
 | 2026-08-13 | Task 3 acceptance measurements, post Task-1/2 honesty fixes (commits `9dce8b3`,`f61d3be`,`edd6ac9`,`4b5d80f`,`ac123f5`) | user's home network (`sweet home 5`, Public profile) | 0.1.3 | Protection OFF: `discord.com`/`gateway.discord.gg` TLS handshake genuinely times out (~6.2-6.3s); `cdn.discordapp.com` reachable | **PASS (a)** Discord desktop logs in fully under DPI-only, not stuck on "Connecting…". **(b)** toggle gap 212–1743ms (see below). **(c)** confirmed minimum `dpi-desync-repeats`=1, 9/9 handshakes held | Not run this pass | **PASS** (a), data recorded (b)(c) | Single run, one network — not yet confirmed on a second ISP/time per this file's own interpretation rules. Test 2's *first* run falsely reported "no repeats value works" — root cause was a bug in the test script itself (see below), not the product. |
 
+## 2026-08-15 (evening) — the INSTALLED build verified end to end (0.1.6)
+
+Everything below the previous entry was tested by running `evorift-svc.exe --console` out of the
+sandbox. **That bypassed the installer**, so it proved the code worked while saying nothing about
+what was actually shipped — and what was shipped was broken in a way no amount of code fixing could
+reach.
+
+### The real defect: the installer shipped a ten-week-old service binary
+
+`resources/evorift-svc.exe` is what the installer and portable zip package — NOT
+`target/release/evorift-svc.exe`. It had been the **26 June binary since 26 June**:
+
+```
+BUILT:    target/release/evorift-svc.exe    2,541,568 B   15.08.2026
+BUNDLED:  resources/evorift-svc.exe         1,213,952 B   26.06.2026   <- stale
+```
+
+`beforeBundleCommand` was supposed to refresh it. It was an inline
+`powershell -Command "Copy-Item ... -Force"` which the build log shows merely **echoing** the
+command text rather than executing it (quoting mangled), and which could not have failed the build
+anyway: `Copy-Item` raises a NON-terminating error, so PowerShell exits 0 and Tauri bundles
+whatever stale file is present. Every shipped build was therefore **new UI + June service**, and
+the service is what runs the engine. That reproduces the original symptoms exactly: no
+`SetProtectionMode` (mode switch fails), no verify state machine ("test edilmedi" forever), old
+WARP path (VPN fails), boot auto-protect back. Confirmed on the laptop: the running service logged
+`auto-start ok (boot koruması açık)` — a line that exists **only** in the old code.
+
+Fixed: `beforeBundleCommand` is now `scripts/stage-svc.ps1` — `ErrorActionPreference=Stop`, a retry
+for file locks, and a **SHA-256 comparison that fails the build** if the staged bytes don't match.
+It proved itself immediately: the first 0.1.6 build **failed** on a bad script path instead of
+silently shipping a stale binary.
+
+### Installed-build verification (0.1.6, silent `/S` install via the test agent)
+
+| Check | Result |
+|---|---|
+| `evorift-svc.exe` before install | 1,213,952 B (26.06.2026) |
+| `evorift-svc.exe` after install | **2,541,568 B, SHA-256 matches shipped** |
+| Uninstall registry | `evorift v0.1.6` |
+| Service startup line | `listening idle (boot auto-protect kapalı — P0-e…)` = **new code** |
+
+Then driven through the **installed** `evorift-ctl.exe` → **installed** `EvoriftSvc`:
+
+```
+start:   running=false state=idle verify=unverified     (no auto-start — P0-e holds)
+DNS before: 192.168.1.1 (ISP)
+
+HAFIF    protmode   38ms | on 4996ms | VERIFY -> verified in  453ms
+         discord.com -> 162.159.138.232, 162.159.128.233, ...   (DNS actually applied)
+GUCLU    protmode 1967ms |            VERIFY -> verified in  851ms
+HAFIF    (back)   1892ms |            VERIFY -> verified in  435ms
+```
+
+**Both shipped modes reach `verified` on the installed build.** Teardown reset DNS to DHCP.
+
+Caveats: single line, single run. The repeats values (6/8) are still unmeasured — see the previous
+entry; DNS masked them and this run did not re-sweep. Two "FAIL" lines in the install-verify output
+were artifacts of that script, not defects: `evorift.exe`'s hash legitimately differs from
+`target/release` because Tauri patches it with bundle metadata, and its old-code regex matched log
+lines predating the install.
+
 ## 2026-08-15 — "stuck on Bağlanıyor / test edilmedi" root-caused and fixed (laptop, measured)
 
 Three consecutive UI test rounds reported: protection stuck on "Bağlanıyor / test edilmedi"

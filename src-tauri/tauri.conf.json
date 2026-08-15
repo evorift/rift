@@ -1,13 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "evorift",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "identifier": "com.evorift.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
-    "beforeBundleCommand": "powershell -NoProfile -Command \"Copy-Item 'src-tauri/target/release/evorift-svc.exe' 'src-tauri/resources/evorift-svc.exe' -Force\"",
+    "beforeBundleCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-svc.ps1",
     "frontendDist": "../build"
   },
   "app": {

@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - _Nothing yet._
 
+## [0.1.6] - 2026-08-15
+
+### Fixed
+
+- **The installer had been shipping an old copy of the background service since June.** The app
+  updated but the part that actually does the work did not, so every "fixed" release behaved
+  exactly like the old one. The build now verifies what it packages and refuses to build otherwise.
+  Verified end to end on a real installation: both protection modes reach Verified.
+
 ## [0.1.5] - 2026-08-15
 
 ### Fixed
