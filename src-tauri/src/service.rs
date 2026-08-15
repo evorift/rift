@@ -306,8 +306,33 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
             if e.strategy.is_empty() {
                 e.strategy = "auto".into();
             }
-            if e.dns.is_empty() {
-                e.dns = "cloudflare".into();
+
+            // Secure DNS is applied HERE, not merely recorded.
+            //
+            // FIXED 2026-08-15 (live test): this used to just set `e.dns = "cloudflare"` — a field,
+            // never applied — so `status` reported dns=cloudflare while the adapters still used the
+            // ISP resolver. On the measured line that resolver answers every Discord domain with
+            // 195.175.254.2 (a sinkhole), and DPI desync CANNOT fix a wrong destination IP: the
+            // connection times out at TCP, before any handshake exists to rewrite. Every strategy
+            // and repeat value failed identically because of it.
+            //
+            // Applied with the engine lock RELEASED (run_dns shells out to PowerShell across every
+            // adapter) — holding it here would reintroduce the freeze fixed in warp.rs.
+            let dns_profile = if e.dns.is_empty() { "cloudflare".to_string() } else { e.dns.clone() };
+            drop(e);
+            let dns_applied = crate::dns::run_dns(&dns_profile);
+            let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+            match &dns_applied {
+                Ok(()) => {
+                    e.dns = dns_profile;
+                    audit("start: secure DNS uygulandı");
+                }
+                Err(m) => {
+                    // Do NOT claim a provider we failed to set. Protection still starts (desync helps
+                    // domains that aren't DNS-poisoned), but the status must not overstate it.
+                    e.dns = "auto".into();
+                    audit(&format!("start: DNS uygulanamadı, sistem DNS'i kullanılıyor: {m}"));
+                }
             }
             if e.hostlist.is_empty() {
                 // Used to be seeded by the removed boot-auto-protect block (P0-e fix, 2026-08-14) --

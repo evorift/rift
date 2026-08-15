@@ -18,7 +18,72 @@ is unrelated to that milestone.
 | Date | Phase | ISP | Version | Baseline | Result | Live-tweak result | Pass/Fail | Notes |
 |---|---|---|---|---|---|---|---|---|
 | 2026-08-13 | P0-a/b/c validation (pre-V0, v1) | not recorded | 0.1.3 | Not cleanly established — see `docs/HYPOTHESES-INTERNET-CUT.md` "known unknowns" | **FAIL** — turning protection on cut ALL internet (not just target domains); Discord never opened | Not reached — run aborted at the outage | **FAIL** | Recovery only on closing the app (process-bound, no manual cleanup needed). Root cause not yet determined — see `docs/HYPOTHESES-INTERNET-CUT.md` for the ranked candidate list and `docs/DIAGNOSE-INTERNET-CUT.md`/`scripts/capture-state.ps1` for the capture procedure still to be run. |
+| 2026-08-15 | MVP UI freeze + DNS root-cause (0.1.5) | user's home network | 0.1.4→0.1.5 | Protection stuck on "Bağlanıyor/test edilmedi" in every mode; ISP resolver answers Discord with sinkhole 195.175.254.2 | **PASS** — freeze fixed (start 1038ms, mode switch 1898ms, verify settles); DNS now actually applied → **hafif verified in 31ms, güçlü verified in 19ms** | Not run this pass | **PASS** | Two independent causes: (1) DPI-only started a WARP tunnel under the engine lock with no child timeout → whole service froze; (2) `Command::Start` reported `dns=cloudflare` without applying it, so Discord resolved to a sinkhole and no strategy could work. Repeats 6/8 still UNMEASURED — DNS masked all four configs. Single line, single run. |
 | 2026-08-13 | Task 3 acceptance measurements, post Task-1/2 honesty fixes (commits `9dce8b3`,`f61d3be`,`edd6ac9`,`4b5d80f`,`ac123f5`) | user's home network (`sweet home 5`, Public profile) | 0.1.3 | Protection OFF: `discord.com`/`gateway.discord.gg` TLS handshake genuinely times out (~6.2-6.3s); `cdn.discordapp.com` reachable | **PASS (a)** Discord desktop logs in fully under DPI-only, not stuck on "Connecting…". **(b)** toggle gap 212–1743ms (see below). **(c)** confirmed minimum `dpi-desync-repeats`=1, 9/9 handshakes held | Not run this pass | **PASS** (a), data recorded (b)(c) | Single run, one network — not yet confirmed on a second ISP/time per this file's own interpretation rules. Test 2's *first* run falsely reported "no repeats value works" — root cause was a bug in the test script itself (see below), not the product. |
+
+## 2026-08-15 — "stuck on Bağlanıyor / test edilmedi" root-caused and fixed (laptop, measured)
+
+Three consecutive UI test rounds reported: protection stuck on "Bağlanıyor / test edilmedi"
+forever in EVERY mode (including Hafif), "Güçlü Koruma" failing with a mode-switch error, and VPN
+never handshaking. Reproduced on the laptop through `evorift-ctl` only. **Two independent causes.**
+
+### Cause 1 — the freeze: a tunnel nobody asked for, under the engine lock, with no timeout
+
+`want_warp()` returned **true when `app_modes` is empty** — the default on a fresh install and in
+every DPI-only mode. So plain "Hafif Koruma" ran `wireguard.exe /installtunnelservice` on every
+Start. That call happens inside `sync_warp()`, which `dispatch()` invokes **while holding the
+engine mutex**, and `run_hidden()` used a plain `cmd.output()` with **no timeout**. One slow tunnel
+install therefore froze the entire service: every later dispatch blocked on the same lock,
+including the 2s health/verify poll. `spawn_verify()` runs *after* `sync_warp()`, so `verify` never
+left `Unverified` — "never Korumalı, never Sorunlu". With no client-side IPC timeout either, the UI
+waited forever instead of erroring.
+
+Fixed: tunnel is opt-in (`want_warp` no longer true on empty), child processes bounded at 25s
+(`run_hidden_timeout`), IPC calls bounded at 45s. Measured after the fix:
+
+| Step | Before | After |
+|---|---|---|
+| `protmode hafif` | error | **179 ms** |
+| `on` (start_protection) | hung indefinitely | **1038 ms** |
+| verify settles | never | **6257 ms** (to `broken` — see cause 2) |
+| `protmode guclu` | "mod değiştirilemedi" | **1898 ms** |
+
+### Cause 2 — DNS was reported but never applied; the ISP answers Discord with a sinkhole
+
+With the freeze gone, verify settled to `broken: discord.com: TCP: connection timed out` — and a
+sweep of four configs failed **identically**, including the 2026-08-13 proven one (catch-all,
+repeats 11). Identical failure across a known-good config means it was never a tuning problem:
+
+| Config | Result |
+|---|---|
+| hafif (hostlist + r6) | broken — `discord.com: TCP: connection timed out` |
+| guclu (catch-all + r8) | broken — same |
+| catch-all + r11 (2026-08-13 proven) | broken — same |
+| catch-all + r6 | broken — same |
+
+Root cause: `Command::Start` set `e.dns = "cloudflare"` **as a field and never applied it**, so
+`status` claimed dns=cloudflare while the adapters still used the ISP resolver — which answers
+every Discord domain with **195.175.254.2**, a sinkhole. DPI desync cannot fix a wrong destination
+IP: the connection dies at TCP, before any handshake exists to rewrite.
+
+```
+BEFORE:  adapters 192.168.1.1        discord.com -> 195.175.254.2
+AFTER:   adapters 1.1.1.1,1.0.0.1    discord.com -> 162.159.138.232, 162.159.128.233, ...
+                                     gateway.discord.gg -> 162.159.130.234, ...
+                                     cdn.discordapp.com -> 162.159.133.233, ...
+VERIFY: verified in 31ms   (hafif)
+VERIFY: verified in 19ms   (guclu, catch-all)
+```
+
+Fixed: Start now applies DNS with the engine lock released, and on failure records `dns=auto`
+rather than claiming a provider it did not set.
+
+**Both shipped modes reach `verified` on this line.** Note this makes secure DNS load-bearing, not
+cosmetic: on a DNS-poisoned line the bypass is useless without it. The repeats values (6/8) remain
+unmeasured — the sweep above could not discriminate between them because DNS masked everything, so
+they stay provisional and the comment at their definition still stands.
+
+Caveat: single line, single run, DNS reset to DHCP afterwards so the laptop was left clean.
 
 ## 2026-08-13 — Task 3 acceptance measurements (post Task 1/2 honesty fixes)
 
@@ -123,6 +188,45 @@ confirmed minimum repeats = 1 (3/3 runs held)
 
 **Confirmed minimum `dpi-desync-repeats` = 1**, verified twice (9/9 individual TLS handshakes
 succeeded). Raw: `docs/captures/test2-sweep.csv`, `test2-result.json`.
+
+### Second, independent run (same evening) — (b) and (c) only
+
+A second session ran TEST 2 and TEST 3 independently against this same laptop (address moved
+`.18`→`.24`→`.20` across two laptop sleep/wake cycles). Recorded here per the interpretation
+rule below ("repeat at least at two different times") — this is that second data point, not a
+replacement for the run above.
+
+**(b) Toggle downtime, 3 reps, mode=dpi:**
+
+| Rep | Direction | Command latency | Network gap |
+|---|---|---|---|
+| 1 | off→on | 25ms | **1137ms** |
+| 1 | on→off | 175ms | **1042ms** |
+| 2 | off→on | 1597ms | 421ms |
+| 2 | on→off | 175ms | 874ms |
+| 3 | off→on | 1604ms | 503ms |
+| 3 | on→off | 104ms | 941ms |
+
+Same shape as the first run (gap does not track command latency; off→on and on→off both land
+mostly under ~1s with occasional excursions above it) — rep 1 exceeded 1s in both directions
+this time instead of rep 3. Raw: `docs/captures/test3-20260813/`.
+
+**(c) Fake-packet minimum:** first attempt this session also produced a false negative — same
+`Task.Wait()`-swallows-the-real-exception bug independently rediscovered, already fixed by the
+other session before this one's clean re-run (see BACKLOG.md P0-e for the fix). Clean re-run
+after the fix: **confirmed minimum `dpi-desync-repeats` = 1, 3/3 runs held** (9/9 TLS
+handshakes), matching the run above exactly. Raw: `docs/captures/test2-20260813-clean/`.
+
+**New this session — a harness-exclusivity bug, filed as BACKLOG.md P0-e:** partway through
+this session's first (contaminated) TEST 2 attempt, `evorift-svc.exe`/`winws.exe` were found
+running minutes after the job that should have owned them had exited, with no scheduled
+task/registry Run key/service found to explain it. `evorift-ctl off` does not verify the DPI
+process it stopped is actually gone. All three test scripts now refuse to start if a prior
+evorift-svc/winws instance is already running — see "Exclusive control" in
+`docs/REMOTE-TESTING.md`. **Open question, not resolved:** this session was told no one else
+was using the laptop, yet this file already contained a full three-test write-up (including a
+human-observed TEST 1) from what must be a separate, concurrent effort — worth reconciling
+before trusting "exclusive control" fully going forward.
 
 ### Caveats (per this file's own interpretation rules)
 

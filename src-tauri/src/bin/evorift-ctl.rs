@@ -35,6 +35,15 @@ fn main() {
             Ok(s) => println!("STOP OK running={}", s.running),
             Err(e) => { eprintln!("STOP HATA: {e}"); std::process::exit(1); }
         },
+        // Güvenli DNS'i uygula (cloudflare|quad9|adguard|google). Headless doğrulama için şart:
+        // DNS zehirlenmiş bir hatta desync tek başına hiçbir şey çözmez (yanlış IP'ye bağlanılır).
+        "dns" => {
+            let profile = std::env::args().nth(2).unwrap_or_else(|| "cloudflare".to_string());
+            match client::command_status(Command::SetDns { profile: profile.clone() }) {
+                Ok(s) => println!("DNS OK -> {profile} (status dns={})", s.dns),
+                Err(e) => { eprintln!("DNS HATA: {e}"); std::process::exit(1); }
+            }
+        }
         // Proof-of-protection probe'unu TEK BAŞINA çalıştır (servis/IPC/yönetici GEREKMEZ).
         // UI "Doğrulanmadı"da takılırsa asıl soru "probe bitiyor mu, ne kadar sürüyor" — bunu
         // servisin içinden göremiyoruz; burada hedef hedef süre + sonuç basılır.

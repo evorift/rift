@@ -23,6 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - _Nothing yet._
 
+## [0.1.5] - 2026-08-15
+
+### Fixed
+
+- **Protection could hang on "Connecting…" forever, in every mode.** Turning protection on started
+  a VPN tunnel even in DPI-only modes that never mention one, and a slow tunnel install froze the
+  whole app with no error and no way out. The tunnel is now only started when you actually ask for
+  it, and no internal step can hang indefinitely any more.
+- **Secure DNS was shown as active without being applied.** On connections where the provider
+  redirects Discord to a dead address, the bypass cannot work at all — it was connecting to the
+  wrong place. DNS is now really applied when protection starts, and if it can't be, the app says
+  so instead of claiming otherwise. Verified working end to end on a blocked line.
+- A leftover network-driver registration from another program (or an older install) could stop the
+  engine from ever starting. It's now cleared properly instead of being left in place.
+
 ## [0.1.4] - 2026-08-14
 
 ### Added
