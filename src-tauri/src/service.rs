@@ -230,12 +230,47 @@ impl Engine {
 /// Caller must already hold `e`'s lock (`engine` is cloned for the thread; `e` is only touched here
 /// synchronously). See `Engine::reset_verify` for the generation-guard rationale.
 fn spawn_verify(engine: &Arc<Mutex<Engine>>, e: &mut Engine) {
+    /// How many times the probe may fail before the engine is declared Broken.
+    ///
+    /// The probe used to run EXACTLY ONCE, immediately after start — straight into the window where
+    /// winws has just spawned and the WinDivert driver is still attaching. A handshake attempted in
+    /// that window loses, and because nothing ever re-probed, the single early failure LATCHED:
+    /// the UI kept saying "Uygulandı ama çalışmıyor" indefinitely while the bypass was in fact
+    /// working seconds later. Reported from real use ("first unreachable, then connection reset,
+    /// then it opens") — the user was watching the engine warm up, and the probe sampled the worst
+    /// moment and never looked again.
+    const VERIFY_ATTEMPTS: usize = 3;
+    /// Gap between retries. Long enough for the driver to attach, short enough that a genuinely
+    /// blocked line still reaches Broken quickly rather than sitting on "checking" for a minute.
+    const VERIFY_RETRY_GAP: Duration = Duration::from_secs(3);
+
     e.verify = VerifyState::Verifying;
     e.verify_gen += 1;
     let my_gen = e.verify_gen;
     let engine = Arc::clone(engine);
     std::thread::spawn(move || {
-        let outcome = crate::verify::probe_discord();
+        let mut outcome = crate::verify::probe_discord();
+        let mut attempt = 1;
+        while !outcome.ok && attempt < VERIFY_ATTEMPTS {
+            // Bail out the moment this probe is stale (stopped / restarted / mode switched), both
+            // before sleeping and after — otherwise a retry could overwrite a NEWER probe's result.
+            {
+                let e = engine.lock().unwrap_or_else(|p| p.into_inner());
+                if e.verify_gen != my_gen {
+                    return;
+                }
+            }
+            std::thread::sleep(VERIFY_RETRY_GAP);
+            {
+                let e = engine.lock().unwrap_or_else(|p| p.into_inner());
+                if e.verify_gen != my_gen {
+                    return;
+                }
+            }
+            attempt += 1;
+            outcome = crate::verify::probe_discord();
+        }
+
         let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
         if e.verify_gen != my_gen {
             return; // stale — stopped/restarted since this probe was launched, discard the result
@@ -246,7 +281,7 @@ fn spawn_verify(engine: &Arc<Mutex<Engine>>, e: &mut Engine) {
             VerifyState::Broken(outcome.reason)
         };
         audit(&format!(
-            "verify: {}",
+            "verify ({attempt}/{VERIFY_ATTEMPTS} deneme): {}",
             match &e.verify {
                 VerifyState::Verified => "verified (real TLS handshake to Discord succeeded)".to_string(),
                 VerifyState::Broken(r) => format!("broken: {r}"),

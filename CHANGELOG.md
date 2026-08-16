@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - _Nothing yet._
 
+## [0.1.8] - 2026-08-16
+
+### Fixed
+
+- **The app could keep showing protection as on after it had actually stopped.** It only re-checked
+  whether the connection was verified, never whether the engine was still running — so if the
+  engine stopped for any reason the switch stayed on while only the small print admitted something
+  was wrong. It now corrects itself against the service every couple of seconds.
+- The protection check no longer gives up after a single failed attempt, so a momentary hiccup
+  right after starting can't leave it stuck on "not verified".
+
 ## [0.1.7] - 2026-08-15
 
 ### Fixed
