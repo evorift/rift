@@ -24,6 +24,10 @@
   --mono: "Cascadia Code", "Consolas", ui-monospace, monospace;
 
   --maxw: 1080px;
+
+  /* Kaydırma ilerlemesi 0→1. Hero'nun rAF döngüsü yazar; sahne yoksa 0 kalır ve
+     ona bağlı her şey açık/görünür durumda kalır. */
+  --p: 0;
 }
 
 * { box-sizing: border-box; }

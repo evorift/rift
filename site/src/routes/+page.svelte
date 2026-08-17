@@ -8,13 +8,8 @@
   const REPO = "https://github.com/evorift/rift";
   const RELEASES = REPO + "/releases";
   const SPONSOR = "https://github.com/sponsors/evorift";
-  const VIRUSTOTAL = "https://www.virustotal.com/";
 
   let openFaq = $state(-1);
-
-  function scrollToGet() {
-    document.getElementById("get")?.scrollIntoView({ behavior: "smooth", block: "center" });
-  }
 
   const features = [
     { k: "unblock", ico: "◎" },
@@ -23,15 +18,17 @@
     { k: "light", ico: "❉" },
   ];
 
-  // Sayfanın "kaputun altında" bölümündeki 3 mod kartı — uygulamada Apps ekranındaki segment butonlarıyla
-  // birebir eşleşir. icon = simge, k = i18n anahtarı kökü (how.mode.<k>.t/d).
+  // Uygulamadaki mod adlarıyla birebir aynı (skill §5). Mor yalnız VPN kartında
+  // görünür; Otomatik henüz çalışmadığı için dürüst bir durum notu taşır.
   const modes = [
-    { k: "off",  ico: "○" },
-    { k: "dpi",  ico: "▚" },
-    { k: "warp", ico: "⤳" },
+    { k: "light",  ico: "◔" },
+    { k: "strong", ico: "◉" },
+    { k: "auto",   ico: "◌", wip: true },
+    { k: "vpn",    ico: "⤳", warp: true },
   ];
 
-  const faqs = [1, 2, 3, 4, 5, 6, 7];
+  const measured = [1, 2, 3];
+  const faqs = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 </script>
 
 <svelte:head>
@@ -54,8 +51,9 @@
   <nav class="top-nav">
     <a href="#features">{t("nav.features")}</a>
     <a href="#how">{t("nav.how")}</a>
+    <a href="#measured">{t("nav.measured")}</a>
     <a href="#faq">{t("nav.faq")}</a>
-    <a href={REPO} target="_blank" rel="noopener">{t("nav.github")}</a>
+    <a href="{base}/indir">{t("nav.download")}</a>
   </nav>
 
   <div class="langs" role="group" aria-label="language">
@@ -65,26 +63,30 @@
   </div>
 </header>
 
-<main id="top">
-  <section class="hero">
-    <div class="bh-stage">
-      <BlackHoleHero onactivate={scrollToGet} />
+<section class="hero" id="top">
+  <div class="hero-sticky">
+    <div class="bh-stage"><BlackHoleHero /></div>
+
+    <div class="hero-copy">
+      <div class="wordmark">{BRAND}</div>
+
+      <span class="chip"><i class="dot"></i>{t("brand.badge")}</span>
+      <h1 class="hero-title">{t("hero.title")}</h1>
+      <p class="hero-sub">{t("hero.sub")}</p>
+
+      <div class="cta" id="get">
+        <a class="btn primary" href={RELEASES} target="_blank" rel="noopener">⬇ {t("cta.download")}</a>
+        <a class="btn" href={REPO} target="_blank" rel="noopener">{t("cta.github")}</a>
+        <a class="btn sponsor" href={SPONSOR} target="_blank" rel="noopener">♥ {t("cta.sponsor")}</a>
+      </div>
+      <span class="platform mono">{t("platform")}</span>
     </div>
 
-    <div class="wordmark">{BRAND}</div>
+    <span class="scroll-hint" aria-hidden="true"></span>
+  </div>
+</section>
 
-    <span class="chip"><i class="dot"></i>{t("brand.badge")}</span>
-    <h1 class="hero-title">{t("hero.title")}</h1>
-    <p class="hero-sub">{t("hero.sub")}</p>
-
-    <div class="cta" id="get">
-      <a class="btn primary" href={RELEASES} target="_blank" rel="noopener">⬇ {t("cta.download")}</a>
-      <a class="btn" href={REPO} target="_blank" rel="noopener">{t("cta.github")}</a>
-      <a class="btn sponsor" href={SPONSOR} target="_blank" rel="noopener">♥ {t("cta.sponsor")}</a>
-    </div>
-    <span class="platform mono">{t("platform")}</span>
-  </section>
-
+<main>
   <section class="features" id="features">
     <h2 class="sec-title">{t("feat.title")}</h2>
     <div class="grid">
@@ -106,24 +108,46 @@
       <li><span class="num">3</span><p>{t("how.3")}</p></li>
     </ol>
 
-    <h3 class="tech-title">{t("how.tech.title")}</h3>
-    <p class="tech-lead">{t("how.tech.lead")}</p>
+    <h3 class="tech-title">{t("how.modes.title")}</h3>
+    <p class="tech-lead">{t("how.modes.lead")}</p>
     <div class="tech-grid">
-      <article class="tech-card">
-        <span class="t-ico" aria-hidden="true">▚</span>
-        <h4>{t("how.dpi.t")}</h4>
-        <p>{t("how.dpi.d")}</p>
-      </article>
-      <article class="tech-card">
-        <span class="t-ico" aria-hidden="true">⤳</span>
-        <h4>{t("how.warp.t")}</h4>
-        <p>{t("how.warp.d")}</p>
-      </article>
-      <article class="tech-card">
-        <span class="t-ico" aria-hidden="true">◴</span>
-        <h4>{t("how.cf.t")}</h4>
-        <p>{t("how.cf.d")}</p>
-      </article>
+      {#each modes as m (m.k)}
+        <article class="tech-card" class:warp={m.warp}>
+          <span class="t-ico" aria-hidden="true">{m.ico}</span>
+          <h4>
+            {t(`mode.${m.k}.t`)}
+            {#if m.wip}<span class="wip mono">{t("mode.wip")}</span>{/if}
+          </h4>
+          <p>{t(`mode.${m.k}.d`)}</p>
+        </article>
+      {/each}
+    </div>
+  </section>
+
+  <!-- Ölçülen. Sitenin signature'ı: her rakam kendi kaydını yanında taşır. -->
+  <section class="measured" id="measured">
+    <h2 class="sec-title">{t("meas.title")}</h2>
+    <p class="meas-lead">{t("meas.lead")}</p>
+    <div class="meas-grid">
+      {#each measured as i (i)}
+        <article class="meas-card">
+          <span class="meas-v mono">{t(`meas.${i}.v`)}</span>
+          <span class="meas-l">{t(`meas.${i}.l`)}</span>
+          <span class="meas-p mono">{t(`meas.${i}.p`)}</span>
+        </article>
+      {/each}
+    </div>
+    <p class="meas-caveat">{t("meas.caveat")}</p>
+  </section>
+
+  <section class="shots" id="shots">
+    <div class="shot-grid">
+      {#each [1, 2, 3] as i (i)}
+        <figure class="shot">
+          <div class="shot-ph mono" aria-hidden="true">{t("shot.ph")} {i}</div>
+          <figcaption>{t(`shot.${i}`)}</figcaption>
+        </figure>
+      {/each}
     </div>
   </section>
 
@@ -156,17 +180,17 @@
     <p class="foot-tag">{t("foot.tagline")}</p>
   </div>
   <nav class="foot-links">
-    <a href="#features">{t("nav.features")}</a>
-    <a href="#how">{t("nav.how")}</a>
+    <a href="{base}/indir">{t("nav.download")}</a>
     <a href="#faq">{t("nav.faq")}</a>
+    <a href="{base}/gizlilik">{t("nav.privacy")}</a>
+    <a href="{base}/destek">{t("nav.support")}</a>
     <a href={REPO} target="_blank" rel="noopener">GitHub</a>
-    <a href={SPONSOR} target="_blank" rel="noopener">♥ {t("cta.sponsor")}</a>
   </nav>
   <p class="ss">{t("foot.smartscreen")}</p>
   <p class="ss">
-    {t("foot.verify")}
-    <a href={VIRUSTOTAL} target="_blank" rel="noopener">VirusTotal</a>.
-    {t("foot.official")} <a href={REPO} target="_blank" rel="noopener">github.com/evorift/rift</a>.
+    {t("foot.official")}
+    <a href={RELEASES} target="_blank" rel="noopener">github.com/evorift/rift/releases</a>.
+    {t("foot.official.warn")}
   </p>
   <p class="made">{t("foot.made")} · © {BRAND}</p>
 </footer>
@@ -212,12 +236,39 @@
 
   section { scroll-margin-top: 84px; }
 
-  .hero { display: flex; flex-direction: column; align-items: center; text-align: center; padding: clamp(20px, 5vw, 56px) 0 60px; }
-  .bh-stage {
-    width: min(440px, 80vw);
-    height: min(440px, 80vw);
-    margin-bottom: 4px;
-    filter: drop-shadow(0 0 60px rgba(57, 230, 107, 0.10));
+  /* Kaydırma sahnesi: 220vh boyunca sticky kalır, delik shader içinde küçülür.
+     DOM tarafında layout işi yok — tek kaydırma bağımlı şey --p ile opacity. */
+  .hero { position: relative; height: 220vh; }
+  .hero-sticky {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+  }
+  .bh-stage { position: absolute; inset: 0; }
+  .hero-copy {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    max-width: 760px;
+    padding: 0 clamp(16px, 5vw, 48px);
+  }
+  .scroll-hint {
+    position: absolute;
+    bottom: 28px;
+    left: 50%;
+    width: 20px;
+    height: 20px;
+    margin-left: -10px;
+    border-right: 2px solid var(--accent-dim);
+    border-bottom: 2px solid var(--accent-dim);
+    transform: rotate(45deg);
+    opacity: calc(1 - var(--p) * 3);
   }
   .wordmark {
     font-size: clamp(32px, 7vw, 56px);
@@ -291,6 +342,66 @@
   .tech-card h4 { font-size: 16px; margin-bottom: 8px; }
   .tech-card p { color: var(--text-muted); font-size: 14px; line-height: 1.55; }
 
+  /* Mor YALNIZ burada — WARP/VPN bağlamı dışında sitenin hiçbir yerinde yok (skill §4). */
+  .tech-card.warp { --warp: #a78bfa; border-color: color-mix(in srgb, var(--warp) 26%, transparent); }
+  .tech-card.warp .t-ico { color: var(--warp); filter: drop-shadow(0 0 10px color-mix(in srgb, var(--warp) 40%, transparent)); }
+  .tech-card.warp:hover { border-color: var(--warp); }
+  .wip {
+    margin-left: 8px;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 600;
+    vertical-align: middle;
+  }
+
+  /* Ölçülen — sitenin signature'ı: her rakam kendi kaydını yanında taşır. */
+  .measured { padding: 40px 0; }
+  .meas-lead { max-width: 640px; margin: -14px auto 26px; text-align: center; color: var(--text-muted); font-size: 14.5px; }
+  .meas-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+  .meas-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-soft);
+    border-left: 2px solid var(--accent-dim);
+    border-radius: var(--radius);
+    padding: 22px;
+  }
+  .meas-v { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; color: var(--accent); }
+  .meas-l { font-size: 14.5px; }
+  .meas-p { color: var(--text-dim); font-size: 11.5px; letter-spacing: 0.02em; }
+  .meas-caveat {
+    max-width: 720px;
+    margin: 22px auto 0;
+    padding-top: 18px;
+    border-top: 1px solid var(--border-soft);
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13.5px;
+    line-height: 1.6;
+  }
+
+  /* Ekran görüntüsü yerleri — gerçek görseller gelince .shot-ph kalkar. */
+  .shots { padding: 8px 0 40px; }
+  .shot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+  .shot { margin: 0; }
+  .shot-ph {
+    display: grid;
+    place-items: center;
+    aspect-ratio: 1000 / 680;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-surface);
+    color: var(--text-dim);
+    font-size: 12px;
+    letter-spacing: 0.04em;
+  }
+  .shot figcaption { margin-top: 10px; color: var(--text-muted); font-size: 13.5px; }
+
   .faq { padding: 40px 0 56px; }
   .faq-list { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }
   .faq-item {
@@ -350,5 +461,18 @@
   @media (max-width: 640px) {
     .top-nav { display: none; }
     .langs { margin-left: auto; }
+  }
+
+  /* Mobilde ve reduced-motion'da sahne statik çizilir. Sabit duran bir şeyi
+     220vh boyunca kaydırtmanın anlamı yok — hero normal akışa döner. */
+  @media (max-width: 767px) {
+    .hero { height: auto; }
+    .hero-sticky { position: static; height: auto; min-height: 100svh; padding: 40px 0 56px; }
+    .scroll-hint { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .hero { height: auto; }
+    .hero-sticky { position: static; height: auto; min-height: 100svh; padding: 40px 0 56px; }
+    .scroll-hint { display: none; }
   }
 </style>

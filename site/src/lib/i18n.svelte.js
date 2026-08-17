@@ -1,303 +1,397 @@
 // Hafif, bağımsız i18n — uygulamadaki yapının landing sürümü. Harici kütüphane yok.
 // `lang` reaktif ($state) → t() çağrıları markup'ta otomatik güncellenir.
+//
+// METİN KURALI (evorift-website skill §1): docs/LIVE-VERIFICATION.md'de ölçülmemiş
+// hiçbir rakam ya da vaat burada geçmez. Rakam varsa yanında sürümü ve koşulu durur.
+// §3: "engel aşma" değil "bağlantı düzeltme" dili. §5: motor adı yok, teknik terim yok.
 
 export const LANGS = /** @type {const} */ (["tr", "en", "es", "ru"]);
 export const LANG_LABEL = { tr: "TR", en: "EN", es: "ES", ru: "RU" };
 
 const tr = {
-  "brand.badge": "Açık kaynak · Ücretsiz · Tek tık",
-  "nav.features": "Özellikler",
+  "brand.badge": "Açık kaynak · Ücretsiz · Sunucusuz",
+  "nav.features": "Ne yapar",
   "nav.how": "Nasıl çalışır",
+  "nav.measured": "Ölçülen",
   "nav.github": "GitHub",
-  "hero.title": "Engelleri aş.",
+  "nav.faq": "SSS",
+  "nav.download": "İndir",
+  "nav.privacy": "Gizlilik",
+  "nav.support": "Destek ol",
+
+  "hero.title": "Bağlantın düzelsin.",
   "hero.sub":
-    "Mesajlaşma, sesli konuşma ve oyunları tek tıkla açan Windows aracı. Hızın düşmez — yalnızca engellenen trafiğe dokunur, gerisi doğrudan akar.",
-  "hero.hint": "Kara deliğe dokun ↑",
+    "Operatör kaynaklı bağlantı bozulmalarını gideren Windows aracı. Mesajlaşma, sesli görüşme ve oyunlar yeniden açılır. Sunucumuz yok — trafiğin bizden geçmez.",
   "cta.download": "Windows için indir",
   "cta.github": "GitHub'da gör",
   "cta.sponsor": "Sponsor ol",
-  "cta.soon": "v0.1 çok yakında — şimdilik GitHub'dan takip et",
-  "platform": "Windows 10 / 11",
+  "platform": "Windows 10 / 11 · 64-bit",
+
   "feat.title": "Ne yapar?",
-  "feat.unblock.t": "Engelleri aşar",
+  "feat.unblock.t": "Bozulan bağlantıyı onarır",
   "feat.unblock.d":
-    "DPI-bypass motoru: sesli konuşma, oyunlar ve engellenen uygulamalar yeniden açılır. Sansürü kelimenin tam anlamıyla yarıp geçer.",
-  "feat.smart.t": "Akıllı, hızlı yönlendirme",
+    "Operatörün bağlantını incelemesinden kaynaklanan bozulmayı giderir; kapanan uygulamalar yeniden açılır. Trafiğin senin cihazından çıkar, bizim hiçbir sunucumuza uğramaz.",
+  "feat.smart.t": "Yalnız gerekene dokunur",
   "feat.smart.d":
-    "Engellenen uygulamalar Cloudflare'in küresel WARP ağından temiz bir yol bulur; gerisi doğrudan kalır. Gereksiz trafik dolaştırılmaz.",
-  "feat.safe.t": "Cerrahi ve güvenli",
+    "Bozulan bağlantılar düzeltilir, geri kalan her şey doğrudan akar. Gereksiz trafik dolaştırılmaz.",
+  "feat.safe.t": "Geri alınabilir",
   "feat.safe.d":
-    "Anti-cheat farkında (Vanguard / EAC / BattlEye). Her ayar geri alınabilir; riskli olan önce uyarır.",
-  "feat.light.t": "Sıfıra yakın kaynak",
+    "Anti-cheat farkındadır (Vanguard / EAC / BattlEye). Yaptığı her ayar geri alınabilir; riskli olan önce sorar.",
+  "feat.light.t": "Yerel yazılım",
   "feat.light.d":
-    "Animasyonlu ama hafif: boştayken %0,3'ten az CPU, ~30 MB RAM. Pencere kapanınca tepside çalışır.",
+    "Hesap yok, abonelik yok, telemetri yok. Pencere kapanınca tepside çalışmaya devam eder.",
+
   "how.title": "Nasıl çalışır?",
-  "how.1": "İndir ve çalıştır — kurulum derdi yok, hesap yok.",
-  "how.2": "Kara deliğe bas — koruma tek tıkla açılır.",
-  "how.3": "Oyna — engellenen uygulamalar açılır, ping'in korunur.",
-  "how.tech.title": "Kaputun altında",
-  "how.tech.lead":
-    "İki teknik birlikte çalışır: çoğu trafik doğrudan akarken engeli aşan paket düzenlemesi, ihtiyaç duyan uygulamalar için Cloudflare WARP üzerinden temiz bir rota.",
-  "how.dpi.t": "DPI atlatma",
-  "how.dpi.d":
-    "Operatörün siteleri bağlantını inceleyerek engeller (derin paket incelemesi / DPI). evorift el sıkışma paketlerini yeniden biçimlendirir; filtre bağlantını sınıflandıramaz, engel hiç tetiklenmez.",
-  "how.warp.t": "WARP bölünmüş tünel",
-  "how.warp.d":
-    "Sesli konuşma gibi bazı uygulamalar temiz bir rota ister. evorift yalnızca o uygulamaları Cloudflare WARP üzerinden gönderir; bağlantının geri kalanı doğrudan kalır.",
-  "how.cf.t": "Cloudflare ağı",
-  "how.cf.d":
-    "WARP, dünyanın en hızlı ağlarından biri olan Cloudflare'in küresel kenarında çalışır — yönlendirilen trafik düşük gecikmede kalır, uzak bir sunucuda yavaşlamaz.",
+  "how.1": "İndir ve çalıştır — hesap açmadan.",
+  "how.2": "Koruma modunu seç.",
+  "how.3": "Kullan — kapanan uygulamalar açılır, trafiğinin geri kalanı doğrudan kalır.",
+
+  "how.modes.title": "Dört mod",
+  "how.modes.lead":
+    "Uygulamadaki adlarla birebir aynı. Hangisinin işe yaradığı hattına göre değişir.",
+  "mode.light.t": "Hafif Koruma",
+  "mode.light.d":
+    "En dar ve en güvenli kapsam: yalnız bilinen birkaç alan adına dokunur, başka hiçbir şeyi değiştirmez.",
+  "mode.strong.t": "Güçlü Koruma",
+  "mode.strong.d":
+    "Geniş kapsam. Ölçülen sonuçların alındığı mod bu — aşağıdaki Ölçülen bölümüne bak.",
+  "mode.auto.t": "Otomatik",
+  "mode.auto.d":
+    "Hattını kendi test edip çalışan ayarı seçmesi hedeflenen mod. Şu anda geliştiriliyor, henüz çalışmıyor.",
+  "mode.vpn.t": "VPN",
+  "mode.vpn.d":
+    "Temiz rota isteyen uygulamalar için Cloudflare WARP üzerinden tünel. Yalnız bu modda tünel kurulur; diğer üç modda trafik doğrudan akar.",
+  "mode.wip": "geliştiriliyor",
+
+  "shot.ph": "ekran görüntüsü",
+  "shot.1": "Ana ekran — koruma modunu buradan seçersin.",
+  "shot.2": "Uygulamalar — hangi uygulamanın nasıl davranacağını sen belirlersin.",
+  "shot.3": "Bağlantı — hattının durumu ve seçili ayar.",
+
+  "meas.title": "Ölçülen",
+  "meas.lead":
+    "Her rakamın yanında hangi sürümde, hangi tarihte ve hangi hatta ölçüldüğü yazıyor. Ölçümü olmayan iddia bu sitede yok.",
+  "meas.1.v": "400/400",
+  "meas.1.l": "başarılı el sıkışma, dört hedef, Güçlü Koruma",
+  "meas.1.p": "2026-08-15 · tek ev hattı · sürüm 0.1.7",
+  "meas.2.v": "184 ms",
+  "meas.2.l": "discord.com ortalama, 100/100 başarılı",
+  "meas.2.p": "2026-08-15 · tek ev hattı · sürüm 0.1.7",
+  "meas.3.v": "12,3 MB",
+  "meas.3.l": "kurulum dosyası boyutu",
+  "meas.3.p": "sürüm 0.3.1",
+  "meas.caveat":
+    "Bu sonuçlar tek hatta, tek oturumda alındı — başka bir operatörde aynısını vereceğini söyleyemeyiz. İndirdiğin 0.3.1 sürümünün ölçüm turu henüz tamamlanmadı; tamamlandığında buradaki rakamlar değişecek.",
+
   "foot.smartscreen":
-    "İmzasız sürüm: ilk açılışta Windows SmartScreen uyarısı çıkabilir → 'More info → Run anyway'.",
-  "foot.verify": "İndirmeni Releases sayfasındaki SHA256SUMS ile doğrula veya",
-  "foot.official": "Tek resmi kaynak:",
+    "Sürüm imzasız: ilk açılışta Windows SmartScreen uyarısı çıkar → 'Ek bilgi → Yine de çalıştır'.",
+  "foot.official": "evorift yalnız buradan dağıtılır:",
+  "foot.official.warn": "Başka bir yerden indirdiğin dosya bize ait değildir.",
   "foot.made": "MIT lisansı altında açık kaynak.",
-  "foot.tagline": "Engelleri aş.",
-  "nav.faq": "SSS",
-  "meta.title": "engelleri aş",
+  "foot.tagline": "Bağlantın düzelsin.",
+  "meta.title": "bağlantı sorunlarını çözer",
+
   "faq.title": "Sık sorulanlar",
-  "faq.q1": "Bağlantımı / ping'imi yavaşlatır mı?",
+  "faq.q1": "Bağlantımı yavaşlatır mı?",
   "faq.a1":
-    "Hayır. Trafiğinin çoğu DPI atlatma ile doğrudan akar. Yalnızca ihtiyaç duyan uygulamalar Cloudflare'in hızlı küresel WARP ağından geçer; böylece hızın ve ping'in korunur.",
+    "Trafiğinin çoğu doğrudan akmaya devam eder — yalnız bozulan bağlantılar düzeltilir. VPN modunu açtığında o moda alınan uygulamalar Cloudflare WARP üzerinden gider; diğer üç modda hiçbir tünel kurulmaz. Gecikme etkisini kendi hattında ölçmedik, o yüzden bir rakam vermiyoruz.",
   "faq.q2": "Oyunlarda / anti-cheat ile güvenli mi?",
   "faq.a2":
-    "Evet. Anti-cheat farkındadır (Vanguard / EAC / BattlEye) ve korumalı bir oyun açılınca otomatik duraklayabilir. Her ayar geri alınabilir.",
-  "faq.q3": "Ücretsiz mi?",
-  "faq.a3": "Evet, tamamen ücretsiz ve açık kaynak (MIT). Hesap yok, abonelik yok.",
-  "faq.q4": "Hangi siteleri/uygulamaları açar?",
+    "Anti-cheat farkındadır (Vanguard / EAC / BattlEye) ve korumalı bir oyun açılınca korumayı otomatik duraklatabilir. Prototip anti-cheat ile çalıştı; bunu bir garanti değil, opsiyonel bir güvenlik ağı olarak sun. Her ayar geri alınabilir.",
+  "faq.q3": "Neden ücretsiz?",
+  "faq.a3":
+    "Sunucu işletmiyoruz, dolayısıyla taşıyacak bir maliyet yok. Hesap yok, abonelik yok, reklam yok, veri satışı yok. Açık kaynak (MIT). İstersen GitHub Sponsors üzerinden destekleyebilirsin, zorunlu değil.",
+  "faq.q4": "Hangi uygulamalar için çalışıyor?",
   "faq.a4":
-    "Mesajlaşma uygulamaları, sesli konuşma, oyunlar ve listene eklediklerin. Hangi alan adlarının etkileneceğini sen seçersin.",
+    "Mesajlaşma, sesli görüşme, oyunlar ve listene eklediklerin. Discord ve Roblox üzerinde doğrulandı. Hangi alan adlarının etkileneceğini sen seçersin.",
   "faq.q5": "Windows ilk açılışta uyarı veriyor (SmartScreen)?",
   "faq.a5":
-    "Ücretsiz kalmak için sürüm imzasız; bu yüzden Windows bir uyarı gösterebilir → 'More info → Run anyway'. İndirme hash'ini doğrulayabilirsin.",
-  "faq.q6": "Antivirüs 'HackTool' veya benzer bir şey diyor, virüs mü bu?",
+    "Sürüm imzasız olduğu için Windows bir uyarı gösterir → 'Ek bilgi → Yine de çalıştır'. Kod imzalama sertifikası yıllık ücretli; ücretsiz kalabilmek için almadık. İndirme sayfasındaki SHA-256 ile dosyanın bozulmadığını doğrulayabilirsin.",
+  "faq.q6": "Antivirüs 'HackTool' diyor, virüs mü bu?",
   "faq.a6":
-    "Hayır — bu WinDivert sürücüsü yüzünden. WinDivert, ağ paketlerini yakalayıp yeniden yazan, açık kaynaklı ve yaygın kullanılan (LGPL) bir Windows sürücüsü; evorift'in DPI atlatması tam olarak bunu kullanır. Bazı antivirüs programları paket yakalayan HER programı — gerçek amacı ne olursa olsun — genel bir imzayla 'HackTool' diye işaretler. Bu bilinen ve beklenen bir yanlış pozitif; aşağıdaki VirusTotal linkinden tüm motorların sonucuna bakabilirsin.",
+    "Hayır — bu WinDivert sürücüsü yüzünden. WinDivert, ağ paketlerini yakalayıp yeniden yazan, açık kaynaklı ve yaygın kullanılan (LGPL) bir Windows sürücüsü; evorift'in bağlantı düzeltmesi tam olarak bunu kullanır. Bazı antivirüs programları paket yakalayan HER programı — gerçek amacı ne olursa olsun — genel bir imzayla 'HackTool' diye işaretler. Bu bilinen ve beklenen bir yanlış pozitif.",
   "faq.q7": "İndirdiğim dosyanın gerçek olduğunu nasıl doğrularım?",
   "faq.a7":
-    "GitHub Releases sayfasındaki her sürümün yanında bir SHA256SUMS dosyası var. PowerShell'de 'Get-FileHash indirdigin-dosya.exe -Algorithm SHA256' çalıştır ve çıktıyı SHA256SUMS'taki satırla karşılaştır — eşleşmiyorsa dosyayı çalıştırma. Aynı sayfadan VirusTotal'a da yükleyip tarayabilirsin. evorift'in TEK resmi kaynağı github.com/evorift/rift/releases — başka hiçbir yerden indirme.",
+    "İndirme sayfasında her dosyanın SHA-256 özeti yazılı. PowerShell'de 'Get-FileHash indirdigin-dosya.exe -Algorithm SHA256' çalıştır ve çıktıyı oradaki satırla karşılaştır — eşleşmiyorsa dosyayı çalıştırma. evorift'in tek resmi kaynağı github.com/evorift/rift/releases; başka hiçbir yerden indirme.",
+  "faq.q8": "Veri topluyor musunuz?",
+  "faq.a8":
+    "Hayır. Sunucumuz yok, hesap yok, telemetri yok. Ayarların ve günlükler yalnız kendi bilgisayarında durur. Günlüklere alan adı yazılmaz — yazılmadığını doğrulayan bir test var. Ayrıntı için Gizlilik sayfasına bak.",
+  "faq.q9": "Yasal mı?",
+  "faq.a9":
+    "evorift yerel bir yazılımdır: bilgisayarında çalışır, bizim işlettiğimiz bir sunucu ya da relay yoktur, trafiğin bizden geçmez. Bir hizmet satmıyoruz. Kendi ülkendeki kuralların ne dediğinden sen sorumlusun.",
+  "faq.q10": "Nasıl kaldırırım?",
+  "faq.a10":
+    "Uygulama içindeki 'Tüm verileri sil' ile yaptığı bütün değişiklikleri geri alır, sonra Windows'un Uygulamalar listesinden normal şekilde kaldırılır. Geride sürücü ya da servis bırakmaz.",
 };
 
 const en = {
-  "brand.badge": "Open source · Free · One-click",
-  "nav.features": "Features",
+  "brand.badge": "Open source · Free · No servers",
+  "nav.features": "What it does",
   "nav.how": "How it works",
+  "nav.measured": "Measured",
   "nav.github": "GitHub",
-  "hero.title": "Break through the block.",
+  "nav.faq": "FAQ",
+  "nav.download": "Download",
+  "nav.privacy": "Privacy",
+  "nav.support": "Support",
+
+  "hero.title": "Get your connection working.",
   "hero.sub":
-    "A Windows tool that unblocks messaging, voice and games in one click. No speed loss — it only touches the traffic that's blocked, everything else stays direct.",
-  "hero.hint": "Tap the black hole ↑",
+    "A Windows tool that repairs connections broken by your provider. Messaging, voice and games start working again. We run no servers — your traffic never passes through us.",
   "cta.download": "Download for Windows",
   "cta.github": "View on GitHub",
   "cta.sponsor": "Sponsor",
-  "cta.soon": "v0.1 coming very soon — follow on GitHub for now",
-  "platform": "Windows 10 / 11",
+  "platform": "Windows 10 / 11 · 64-bit",
+
   "feat.title": "What it does",
-  "feat.unblock.t": "Breaks the block",
+  "feat.unblock.t": "Repairs a broken connection",
   "feat.unblock.d":
-    "A DPI-bypass engine: voice calls, games and blocked apps come back to life. It literally rifts through censorship.",
-  "feat.smart.t": "Smart, fast routing",
+    "Fixes the breakage caused by your provider inspecting your connection, so apps that stopped working start again. Your traffic leaves your own machine and touches none of our servers.",
+  "feat.smart.t": "Touches only what needs it",
   "feat.smart.d":
-    "Blocked apps get a clean path through Cloudflare's global WARP network; everything else stays direct. No detour for traffic that doesn't need it.",
-  "feat.safe.t": "Surgical and safe",
+    "Broken connections get repaired, everything else flows direct. No detour for traffic that doesn't need one.",
+  "feat.safe.t": "Reversible",
   "feat.safe.d":
-    "Anti-cheat aware (Vanguard / EAC / BattlEye). Every setting is reversible; risky ones warn you first.",
-  "feat.light.t": "Near-zero footprint",
+    "Anti-cheat aware (Vanguard / EAC / BattlEye). Every setting it changes can be undone; the risky ones ask first.",
+  "feat.light.t": "Local software",
   "feat.light.d":
-    "Animated but light: under 0.3% CPU and ~30 MB RAM when idle. Runs in the tray when the window is closed.",
+    "No account, no subscription, no telemetry. Keeps running in the tray when you close the window.",
+
   "how.title": "How it works",
-  "how.1": "Download and run — no setup, no account.",
-  "how.2": "Hit the black hole — protection turns on in one click.",
-  "how.3": "Play — blocked apps open up, your ping stays intact.",
-  "how.tech.title": "Under the hood",
-  "how.tech.lead":
-    "Two techniques work together: packet-level bypass keeps most traffic flowing direct past the block, and a clean route through Cloudflare WARP for the apps that need one.",
-  "how.dpi.t": "DPI bypass",
-  "how.dpi.d":
-    "Your provider blocks sites by inspecting your connection (deep packet inspection). evorift reshapes the handshake packets so the filter can't classify them — the block never triggers, and your traffic stays direct.",
-  "how.warp.t": "WARP split-tunnel",
-  "how.warp.d":
-    "Some apps — like voice calls — need a clean route. evorift sends only those apps through Cloudflare WARP, while the rest of your connection stays direct.",
-  "how.cf.t": "Cloudflare network",
-  "how.cf.d":
-    "WARP runs on Cloudflare's global edge — one of the fastest networks in the world — so routed traffic stays low-latency instead of slowing down on a distant server.",
+  "how.1": "Download and run — no account needed.",
+  "how.2": "Pick a protection mode.",
+  "how.3": "Use it — apps that stopped working open up, the rest of your traffic stays direct.",
+
+  "how.modes.title": "Four modes",
+  "how.modes.lead":
+    "Named exactly as they are in the app. Which one works depends on your line.",
+  "mode.light.t": "Hafif Koruma",
+  "mode.light.d":
+    "The narrowest, safest scope: touches only a few known domains and changes nothing else.",
+  "mode.strong.t": "Güçlü Koruma",
+  "mode.strong.d":
+    "Wide scope. This is the mode the measured results below were taken in.",
+  "mode.auto.t": "Otomatik",
+  "mode.auto.d":
+    "Intended to test your line and pick the setting that works. Currently in development — it does not work yet.",
+  "mode.vpn.t": "VPN",
+  "mode.vpn.d":
+    "A tunnel through Cloudflare WARP for apps that need a clean route. Only this mode builds a tunnel; in the other three your traffic goes direct.",
+  "mode.wip": "in development",
+
+  "shot.ph": "screenshot",
+  "shot.1": "Main screen — this is where you pick a protection mode.",
+  "shot.2": "Apps — you decide how each app behaves.",
+  "shot.3": "Connection — the state of your line and the selected setting.",
+
+  "meas.title": "Measured",
+  "meas.lead":
+    "Every number here carries the version, the date and the line it was measured on. Nothing unmeasured is claimed on this site.",
+  "meas.1.v": "400/400",
+  "meas.1.l": "successful handshakes, four targets, Güçlü Koruma",
+  "meas.1.p": "2026-08-15 · one home line · version 0.1.7",
+  "meas.2.v": "184 ms",
+  "meas.2.l": "discord.com average, 100/100 successful",
+  "meas.2.p": "2026-08-15 · one home line · version 0.1.7",
+  "meas.3.v": "12.3 MB",
+  "meas.3.l": "installer size",
+  "meas.3.p": "version 0.3.1",
+  "meas.caveat":
+    "These results come from one line in one session — we cannot tell you they will repeat on another provider. The measurement pass for the 0.3.1 build you download has not been completed yet; these numbers will change when it is.",
+
   "foot.smartscreen":
-    "Unsigned build: Windows SmartScreen may warn on first launch → 'More info → Run anyway'.",
-  "foot.verify": "Verify your download against the SHA256SUMS on the Releases page, or check it on",
-  "foot.official": "The only official source is:",
+    "Unsigned build: Windows SmartScreen will warn on first launch → 'More info → Run anyway'.",
+  "foot.official": "evorift is distributed only from here:",
+  "foot.official.warn": "A file you downloaded anywhere else is not ours.",
   "foot.made": "Open source under the MIT license.",
-  "foot.tagline": "Break through the block.",
-  "nav.faq": "FAQ",
-  "meta.title": "break through the block",
+  "foot.tagline": "Get your connection working.",
+  "meta.title": "fixes connection problems",
+
   "faq.title": "Frequently asked",
-  "faq.q1": "Will it slow my connection or ping?",
+  "faq.q1": "Will it slow my connection down?",
   "faq.a1":
-    "No. Most of your traffic stays direct via DPI bypass. Only the apps that need it are routed through Cloudflare's fast global WARP network, so your speed and ping stay intact.",
+    "Most of your traffic keeps flowing direct — only broken connections get repaired. When you turn on VPN mode, the apps you put in it go through Cloudflare WARP; the other three modes build no tunnel at all. We have not measured the latency effect on your line, so we are not giving you a number.",
   "faq.q2": "Is it safe with games / anti-cheat?",
   "faq.a2":
-    "Yes. It's anti-cheat aware (Vanguard / EAC / BattlEye) and can auto-pause when a protected game launches. Every setting is reversible.",
-  "faq.q3": "Is it free?",
-  "faq.a3": "Yes, fully free and open source (MIT). No accounts, no subscriptions.",
-  "faq.q4": "Which sites / apps does it unblock?",
+    "It is anti-cheat aware (Vanguard / EAC / BattlEye) and can pause protection automatically when a protected game starts. It worked with a prototype anti-cheat; treat it as an optional safety net, not a guarantee. Every setting is reversible.",
+  "faq.q3": "Why is it free?",
+  "faq.a3":
+    "We run no servers, so there is no cost to pass on. No accounts, no subscriptions, no ads, no data selling. Open source (MIT). You can support it through GitHub Sponsors if you want to — it is not required.",
+  "faq.q4": "Which apps does it work for?",
   "faq.a4":
-    "Messaging apps, voice calls, games, and whatever you add to the list. You choose which domains are affected.",
+    "Messaging, voice, games, and whatever you add to the list. Verified on Discord and Roblox. You choose which domains are affected.",
   "faq.q5": "Windows warns me on first launch (SmartScreen)?",
   "faq.a5":
-    "To stay free the build is unsigned, so Windows may show a SmartScreen prompt → 'More info → Run anyway'. You can verify the download hash.",
-  "faq.q6": "My antivirus says 'HackTool' or similar — is this a virus?",
+    "The build is unsigned, so Windows shows a warning → 'More info → Run anyway'. A code-signing certificate costs money every year; we did not buy one in order to stay free. You can verify the file against the SHA-256 on the download page.",
+  "faq.q6": "My antivirus says 'HackTool' — is this a virus?",
   "faq.a6":
-    "No — that's the WinDivert driver. WinDivert is an open-source, widely-used (LGPL) Windows driver that captures and rewrites network packets; evorift's DPI bypass is built on exactly that. Some antivirus engines flag ANY program that captures packets — regardless of what it actually does — with a generic 'HackTool' signature. This is a known, expected false positive; check the VirusTotal link below to see every engine's verdict at once.",
+    "No — that is the WinDivert driver. WinDivert is an open-source, widely used (LGPL) Windows driver that captures and rewrites network packets, and evorift's connection repair is built on exactly that. Some antivirus engines flag ANY program that captures packets — whatever it actually does — with a generic 'HackTool' signature. This is a known, expected false positive.",
   "faq.q7": "How do I verify the file I downloaded is genuine?",
   "faq.a7":
-    "Every release on the GitHub Releases page ships with a SHA256SUMS file. Run 'Get-FileHash your-download.exe -Algorithm SHA256' in PowerShell and compare the output against the matching line in SHA256SUMS — if it doesn't match, don't run it. You can also upload the file to VirusTotal from the same page. The ONLY official source for evorift is github.com/evorift/rift/releases — never download it anywhere else.",
+    "The download page lists the SHA-256 of every file. Run 'Get-FileHash your-download.exe -Algorithm SHA256' in PowerShell and compare it to the line there — if it does not match, do not run it. evorift's only official source is github.com/evorift/rift/releases; never download it anywhere else.",
+  "faq.q8": "Do you collect data?",
+  "faq.a8":
+    "No. No servers, no accounts, no telemetry. Your settings and logs stay on your own machine. Domain names are not written to the logs — there is a test that proves they aren't. See the Privacy page for detail.",
+  "faq.q9": "Is it legal?",
+  "faq.a9":
+    "evorift is local software: it runs on your machine, there is no server or relay we operate, and your traffic does not pass through us. We are not selling a service. What your own country's rules say is your responsibility.",
+  "faq.q10": "How do I uninstall it?",
+  "faq.a10":
+    "'Tüm verileri sil' inside the app reverts every change it made, then you remove it normally from the Windows apps list. It leaves no driver or service behind.",
 };
 
 const es = {
-  "brand.badge": "Código abierto · Gratis · Un clic",
-  "nav.features": "Funciones",
+  "brand.badge": "Código abierto · Gratis · Sin servidores",
+  "nav.features": "Qué hace",
   "nav.how": "Cómo funciona",
+  "nav.measured": "Medido",
   "nav.github": "GitHub",
-  "hero.title": "Atraviesa el bloqueo.",
+  "nav.faq": "FAQ",
+  "nav.download": "Descargar",
+  "nav.privacy": "Privacidad",
+  "nav.support": "Apoyar",
+
+  "hero.title": "Que tu conexión funcione.",
   "hero.sub":
-    "Una herramienta de Windows que desbloquea mensajería, voz y juegos con un clic. Sin pérdida de velocidad: solo toca el tráfico bloqueado, el resto va directo.",
-  "hero.hint": "Toca el agujero negro ↑",
+    "Una herramienta de Windows que repara conexiones dañadas por tu proveedor. La mensajería, la voz y los juegos vuelven a funcionar. No tenemos servidores: tu tráfico no pasa por nosotros.",
   "cta.download": "Descargar para Windows",
   "cta.github": "Ver en GitHub",
   "cta.sponsor": "Patrocinar",
-  "cta.soon": "v0.1 muy pronto — sigue en GitHub por ahora",
-  "platform": "Windows 10 / 11",
+  "platform": "Windows 10 / 11 · 64 bits",
+
   "feat.title": "Qué hace",
-  "feat.unblock.t": "Rompe el bloqueo",
+  "feat.unblock.t": "Repara una conexión dañada",
   "feat.unblock.d":
-    "Un motor anti-DPI: las llamadas de voz, los juegos y las apps bloqueadas vuelven a funcionar. Atraviesa la censura.",
-  "feat.smart.t": "Enrutado inteligente y rápido",
+    "Corrige el daño que causa tu proveedor al inspeccionar tu conexión, así las apps que dejaron de funcionar arrancan de nuevo. Tu tráfico sale de tu propia máquina y no toca ningún servidor nuestro.",
+  "feat.smart.t": "Solo toca lo necesario",
   "feat.smart.d":
-    "Las apps bloqueadas obtienen una ruta limpia por la red global WARP de Cloudflare; el resto va directo. Sin desvíos para el tráfico que no los necesita.",
-  "feat.safe.t": "Quirúrgico y seguro",
+    "Las conexiones dañadas se reparan, el resto va directo. Sin desvíos para el tráfico que no los necesita.",
+  "feat.safe.t": "Reversible",
   "feat.safe.d":
-    "Consciente del anti-cheat (Vanguard / EAC / BattlEye). Cada ajuste es reversible; los riesgosos avisan primero.",
-  "feat.light.t": "Huella casi nula",
+    "Consciente del anti-cheat (Vanguard / EAC / BattlEye). Cada ajuste que hace se puede deshacer; los riesgosos preguntan primero.",
+  "feat.light.t": "Software local",
   "feat.light.d":
-    "Animado pero ligero: menos del 0,3 % de CPU y ~30 MB de RAM en reposo. Funciona en la bandeja al cerrar la ventana.",
+    "Sin cuenta, sin suscripción, sin telemetría. Sigue en la bandeja cuando cierras la ventana.",
+
   "how.title": "Cómo funciona",
-  "how.1": "Descarga y ejecuta — sin instalación, sin cuenta.",
-  "how.2": "Pulsa el agujero negro — la protección se activa con un clic.",
-  "how.3": "Juega — las apps bloqueadas se abren, tu ping se mantiene.",
-  "how.tech.title": "Bajo el capó",
-  "how.tech.lead":
-    "Dos técnicas trabajan juntas: un ajuste a nivel de paquete mantiene la mayoría del tráfico directo saltándose el bloqueo, y una ruta limpia por Cloudflare WARP para las apps que la necesitan.",
-  "how.dpi.t": "Evasión de DPI",
-  "how.dpi.d":
-    "Tu proveedor bloquea sitios inspeccionando tu conexión (inspección profunda de paquetes / DPI). evorift reescribe los paquetes del saludo para que el filtro no pueda clasificarlos — el bloqueo nunca se activa y tu tráfico va directo.",
-  "how.warp.t": "Túnel dividido WARP",
-  "how.warp.d":
-    "Algunas apps —como las llamadas de voz— necesitan una ruta limpia. evorift envía solo esas apps por Cloudflare WARP, mientras el resto de tu conexión va directo.",
-  "how.cf.t": "Red de Cloudflare",
-  "how.cf.d":
-    "WARP corre en el edge global de Cloudflare —una de las redes más rápidas del mundo—, así el tráfico enrutado mantiene baja latencia en vez de frenarse en un servidor lejano.",
+  "how.1": "Descarga y ejecuta — sin crear una cuenta.",
+  "how.2": "Elige un modo de protección.",
+  "how.3": "Úsalo — las apps que dejaron de funcionar se abren, el resto del tráfico sigue directo.",
+
+  "how.modes.title": "Cuatro modos",
+  "how.modes.lead":
+    "Con los mismos nombres que en la aplicación. Cuál funciona depende de tu línea.",
+  "mode.light.t": "Hafif Koruma",
+  "mode.light.d":
+    "El alcance más estrecho y seguro: solo toca unos pocos dominios conocidos y no cambia nada más.",
+  "mode.strong.t": "Güçlü Koruma",
+  "mode.strong.d": "Alcance amplio. Es el modo en el que se tomaron los resultados medidos.",
+  "mode.auto.t": "Otomatik",
+  "mode.auto.d":
+    "Pensado para probar tu línea y elegir el ajuste que funcione. En desarrollo — todavía no funciona.",
+  "mode.vpn.t": "VPN",
+  "mode.vpn.d":
+    "Un túnel por Cloudflare WARP para las apps que necesitan una ruta limpia. Solo este modo crea un túnel; en los otros tres el tráfico va directo.",
+
+  "meas.title": "Medido",
+  "meas.lead":
+    "Cada número indica la versión, la fecha y la línea en la que se midió. En este sitio no se afirma nada sin medición.",
+  "meas.1.v": "400/400",
+  "meas.1.l": "saludos correctos, cuatro objetivos, Güçlü Koruma",
+  "meas.1.p": "2026-08-15 · una línea doméstica · versión 0.1.7",
+  "meas.2.v": "184 ms",
+  "meas.2.l": "media de discord.com, 100/100 correctos",
+  "meas.2.p": "2026-08-15 · una línea doméstica · versión 0.1.7",
+  "meas.3.v": "12,3 MB",
+  "meas.3.l": "tamaño del instalador",
+  "meas.3.p": "versión 0.3.1",
+  "meas.caveat":
+    "Estos resultados vienen de una sola línea en una sola sesión — no podemos decirte que se repetirán con otro proveedor. La ronda de medición de la versión 0.3.1 que descargas aún no se ha completado; estos números cambiarán cuando lo esté.",
+
   "foot.smartscreen":
-    "Build sin firmar: Windows SmartScreen puede avisar al inicio → 'Más información → Ejecutar de todos modos'.",
-  "foot.verify": "Verifica tu descarga con el SHA256SUMS de la página de Releases, o compruébala en",
-  "foot.official": "La única fuente oficial es:",
+    "Build sin firmar: Windows SmartScreen avisará al primer inicio → 'Más información → Ejecutar de todos modos'.",
+  "foot.official": "evorift se distribuye solo desde aquí:",
+  "foot.official.warn": "Un archivo descargado en cualquier otro sitio no es nuestro.",
   "foot.made": "Código abierto bajo licencia MIT.",
-  "foot.tagline": "Atraviesa el bloqueo.",
-  "nav.faq": "FAQ",
-  "meta.title": "atraviesa el bloqueo",
-  "faq.title": "Preguntas frecuentes",
-  "faq.q1": "¿Ralentiza mi conexión o mi ping?",
-  "faq.a1":
-    "No. La mayor parte de tu tráfico va directo gracias a la evasión de DPI. Solo las apps que lo necesitan se enrutan por la rápida red global WARP de Cloudflare, así tu velocidad y tu ping se mantienen.",
-  "faq.q2": "¿Es seguro con juegos / anti-cheat?",
-  "faq.a2":
-    "Sí. Es consciente del anti-cheat (Vanguard / EAC / BattlEye) y puede pausarse solo cuando se abre un juego protegido. Cada ajuste es reversible.",
-  "faq.q3": "¿Es gratis?",
-  "faq.a3": "Sí, totalmente gratis y de código abierto (MIT). Sin cuentas, sin suscripciones.",
-  "faq.q4": "¿Qué sitios / apps desbloquea?",
-  "faq.a4":
-    "Apps de mensajería, llamadas de voz, juegos y lo que añadas a la lista. Tú eliges qué dominios se ven afectados.",
-  "faq.q5": "¿Windows me avisa al iniciar (SmartScreen)?",
-  "faq.a5":
-    "Para seguir siendo gratis la build no está firmada, así que Windows puede mostrar un aviso de SmartScreen → 'Más información → Ejecutar de todos modos'. Puedes verificar el hash de la descarga.",
-  "faq.q6": "Mi antivirus dice 'HackTool' o algo parecido, ¿es un virus?",
-  "faq.a6":
-    "No — es por el controlador WinDivert. WinDivert es un controlador de Windows de código abierto y muy usado (LGPL) que captura y reescribe paquetes de red; la evasión de DPI de evorift se basa exactamente en eso. Algunos antivirus marcan CUALQUIER programa que capture paquetes —sea cual sea su propósito real— con una firma genérica de 'HackTool'. Es un falso positivo conocido y esperado; revisa el enlace de VirusTotal más abajo para ver el veredicto de todos los motores a la vez.",
-  "faq.q7": "¿Cómo verifico que el archivo que descargué es auténtico?",
-  "faq.a7":
-    "Cada versión en la página de GitHub Releases incluye un archivo SHA256SUMS. Ejecuta 'Get-FileHash tu-descarga.exe -Algorithm SHA256' en PowerShell y compara el resultado con la línea correspondiente en SHA256SUMS — si no coincide, no lo ejecutes. También puedes subir el archivo a VirusTotal desde la misma página. La ÚNICA fuente oficial de evorift es github.com/evorift/rift/releases — nunca lo descargues de otro sitio.",
+  "foot.tagline": "Que tu conexión funcione.",
+  "meta.title": "arregla problemas de conexión",
 };
 
 const ru = {
-  "brand.badge": "Открытый код · Бесплатно · Один клик",
-  "nav.features": "Возможности",
-  "nav.how": "Как это работает",
+  "brand.badge": "Открытый код · Бесплатно · Без серверов",
+  "nav.features": "Что делает",
+  "nav.how": "Как работает",
+  "nav.measured": "Измерено",
   "nav.github": "GitHub",
-  "hero.title": "Пробей блокировку.",
+  "nav.faq": "ЧаВо",
+  "nav.download": "Скачать",
+  "nav.privacy": "Приватность",
+  "nav.support": "Поддержать",
+
+  "hero.title": "Пусть соединение работает.",
   "hero.sub":
-    "Программа для Windows, которая разблокирует мессенджеры, голосовые вызовы и игры одним кликом. Без потери скорости — затрагивает только заблокированный трафик, остальное идёт напрямую.",
-  "hero.hint": "Коснитесь чёрной дыры ↑",
+    "Программа для Windows, которая исправляет соединение, испорченное провайдером. Мессенджеры, голосовые вызовы и игры снова работают. У нас нет серверов — ваш трафик через нас не идёт.",
   "cta.download": "Скачать для Windows",
   "cta.github": "Открыть на GitHub",
   "cta.sponsor": "Спонсировать",
-  "cta.soon": "v0.1 уже совсем скоро — пока следите на GitHub",
-  "platform": "Windows 10 / 11",
-  "feat.title": "Что она делает",
-  "feat.unblock.t": "Снимает блокировку",
+  "platform": "Windows 10 / 11 · 64-бит",
+
+  "feat.title": "Что делает",
+  "feat.unblock.t": "Исправляет испорченное соединение",
   "feat.unblock.d":
-    "Движок обхода DPI: голосовые вызовы, игры и заблокированные приложения снова работают. Буквально прорывает цензуру.",
-  "feat.smart.t": "Умная, быстрая маршрутизация",
+    "Устраняет поломку, возникающую из-за того, что провайдер разбирает ваше соединение, и приложения снова начинают работать. Трафик уходит с вашей машины и не касается наших серверов.",
+  "feat.smart.t": "Трогает только нужное",
   "feat.smart.d":
-    "Заблокированные приложения получают чистый путь через глобальную сеть Cloudflare WARP; остальное идёт напрямую. Лишний трафик никуда не заворачивается.",
-  "feat.safe.t": "Точно и безопасно",
+    "Испорченные соединения исправляются, остальное идёт напрямую. Лишний трафик никуда не заворачивается.",
+  "feat.safe.t": "Обратимо",
   "feat.safe.d":
-    "Учитывает анти-чит (Vanguard / EAC / BattlEye). Любую настройку можно откатить; рискованные предупреждают.",
-  "feat.light.t": "Почти нулевая нагрузка",
+    "Учитывает анти-чит (Vanguard / EAC / BattlEye). Любую сделанную настройку можно откатить; рискованные спрашивают заранее.",
+  "feat.light.t": "Локальная программа",
   "feat.light.d":
-    "Анимировано, но легко: меньше 0,3 % CPU и ~30 МБ ОЗУ в простое. При закрытии окна работает в трее.",
-  "how.title": "Как это работает",
-  "how.1": "Скачайте и запустите — без установки и аккаунта.",
-  "how.2": "Нажмите на чёрную дыру — защита включается одним кликом.",
-  "how.3": "Играйте — заблокированные приложения открываются, пинг сохраняется.",
-  "how.tech.title": "Под капотом",
-  "how.tech.lead":
-    "Две техники работают вместе: правка пакетов на лету пропускает большую часть трафика напрямую мимо блокировки, а для приложений, которым нужно, — чистый маршрут через Cloudflare WARP.",
-  "how.dpi.t": "Обход DPI",
-  "how.dpi.d":
-    "Провайдер блокирует сайты, разбирая ваше соединение (глубокая инспекция пакетов / DPI). evorift переформирует пакеты рукопожатия, и фильтр не может их классифицировать — блокировка не срабатывает, а трафик идёт напрямую.",
-  "how.warp.t": "Раздельный туннель WARP",
-  "how.warp.d":
-    "Некоторым приложениям — например, голосовым вызовам — нужен чистый маршрут. evorift отправляет через Cloudflare WARP только эти приложения, а остальное соединение идёт напрямую.",
-  "how.cf.t": "Сеть Cloudflare",
-  "how.cf.d":
-    "WARP работает на глобальном edge Cloudflare — одной из самых быстрых сетей в мире — поэтому маршрутизированный трафик остаётся с низкой задержкой, а не тормозит на далёком сервере.",
+    "Без аккаунта, без подписки, без телеметрии. При закрытии окна продолжает работать в трее.",
+
+  "how.title": "Как работает",
+  "how.1": "Скачайте и запустите — без регистрации.",
+  "how.2": "Выберите режим защиты.",
+  "how.3": "Пользуйтесь — переставшие работать приложения открываются, остальной трафик идёт напрямую.",
+
+  "how.modes.title": "Четыре режима",
+  "how.modes.lead":
+    "Названия те же, что в приложении. Какой сработает — зависит от вашей линии.",
+  "mode.light.t": "Hafif Koruma",
+  "mode.light.d":
+    "Самый узкий и безопасный охват: затрагивает лишь несколько известных доменов и больше ничего не меняет.",
+  "mode.strong.t": "Güçlü Koruma",
+  "mode.strong.d": "Широкий охват. Именно в этом режиме получены измерения ниже.",
+  "mode.auto.t": "Otomatik",
+  "mode.auto.d":
+    "Задуман так, чтобы сам проверил линию и выбрал работающую настройку. В разработке — пока не работает.",
+  "mode.vpn.t": "VPN",
+  "mode.vpn.d":
+    "Туннель через Cloudflare WARP для приложений, которым нужен чистый маршрут. Туннель создаётся только в этом режиме; в остальных трёх трафик идёт напрямую.",
+
+  "meas.title": "Измерено",
+  "meas.lead":
+    "У каждого числа указаны версия, дата и линия, на которой оно измерено. Ничего неизмеренного на этом сайте не утверждается.",
+  "meas.1.v": "400/400",
+  "meas.1.l": "успешных рукопожатий, четыре цели, Güçlü Koruma",
+  "meas.1.p": "2026-08-15 · одна домашняя линия · версия 0.1.7",
+  "meas.2.v": "184 мс",
+  "meas.2.l": "среднее по discord.com, 100/100 успешно",
+  "meas.2.p": "2026-08-15 · одна домашняя линия · версия 0.1.7",
+  "meas.3.v": "12,3 МБ",
+  "meas.3.l": "размер установщика",
+  "meas.3.p": "версия 0.3.1",
+  "meas.caveat":
+    "Эти результаты получены на одной линии за одну сессию — мы не можем обещать, что они повторятся у другого провайдера. Измерительный прогон для версии 0.3.1, которую вы скачиваете, ещё не завершён; когда он завершится, числа изменятся.",
+
   "foot.smartscreen":
-    "Сборка без подписи: при первом запуске Windows SmartScreen может предупредить → 'Подробнее → Выполнить в любом случае'.",
-  "foot.verify": "Сверьте загрузку с SHA256SUMS на странице Releases или проверьте на",
-  "foot.official": "Единственный официальный источник:",
+    "Сборка без подписи: при первом запуске Windows SmartScreen предупредит → 'Подробнее → Выполнить в любом случае'.",
+  "foot.official": "evorift распространяется только отсюда:",
+  "foot.official.warn": "Файл, скачанный где-либо ещё, не наш.",
   "foot.made": "Открытый код под лицензией MIT.",
-  "foot.tagline": "Пробей блокировку.",
-  "nav.faq": "ЧаВо",
-  "meta.title": "пробей блокировку",
-  "faq.title": "Частые вопросы",
-  "faq.q1": "Замедлит ли это соединение или пинг?",
-  "faq.a1":
-    "Нет. Большая часть трафика идёт напрямую благодаря обходу DPI. Только нужные приложения маршрутизируются через быструю глобальную сеть Cloudflare WARP, поэтому скорость и пинг сохраняются.",
-  "faq.q2": "Безопасно с играми / анти-читом?",
-  "faq.a2":
-    "Да. Учитывает анти-чит (Vanguard / EAC / BattlEye) и может сам приостановиться при запуске защищённой игры. Любую настройку можно откатить.",
-  "faq.q3": "Это бесплатно?",
-  "faq.a3": "Да, полностью бесплатно и с открытым кодом (MIT). Без аккаунтов и подписок.",
-  "faq.q4": "Какие сайты / приложения разблокирует?",
-  "faq.a4":
-    "Мессенджеры, голосовые вызовы, игры и всё, что вы добавите в список. Вы сами выбираете, какие домены затрагиваются.",
-  "faq.q5": "Windows предупреждает при первом запуске (SmartScreen)?",
-  "faq.a5":
-    "Чтобы оставаться бесплатной, сборка без подписи, поэтому Windows может показать предупреждение → 'Подробнее → Выполнить в любом случае'. Можно проверить хеш загрузки.",
-  "faq.q6": "Антивирус пишет 'HackTool' или что-то похожее — это вирус?",
-  "faq.a6":
-    "Нет — дело в драйвере WinDivert. WinDivert — это открытый и широко используемый (LGPL) драйвер Windows, который перехватывает и переписывает сетевые пакеты; обход DPI в evorift построен именно на этом. Некоторые антивирусы помечают ЛЮБУЮ программу, перехватывающую пакеты, — независимо от её реального назначения — общей сигнатурой 'HackTool'. Это известный и ожидаемый ложноположительный результат; посмотрите ссылку на VirusTotal ниже, чтобы увидеть вердикт всех движков сразу.",
-  "faq.q7": "Как проверить, что скачанный файл подлинный?",
-  "faq.a7":
-    "К каждому релизу на странице GitHub Releases прилагается файл SHA256SUMS. Выполните в PowerShell 'Get-FileHash ваш-файл.exe -Algorithm SHA256' и сравните результат со строкой в SHA256SUMS — если не совпадает, не запускайте файл. Файл также можно загрузить на VirusTotal с той же страницы. ЕДИНСТВЕННЫЙ официальный источник evorift — github.com/evorift/rift/releases, не скачивайте его больше нигде.",
+  "foot.tagline": "Пусть соединение работает.",
+  "meta.title": "решает проблемы с соединением",
 };
 
 const dict = { tr, en, es, ru };
@@ -317,15 +411,30 @@ export function setLang(l) {
   } catch {}
 }
 
+/** Kayıtlı tercih → bilgisayarın dili → Türkçe. */
 export function initLang() {
   try {
     const saved = localStorage.getItem("rift-lang");
     if (saved && LANGS.includes(saved)) return setLang(saved);
   } catch {}
-  const nav = (typeof navigator !== "undefined" && navigator.language || "tr").slice(0, 2);
-  setLang(LANGS.includes(nav) ? nav : "tr");
+  const prefs =
+    typeof navigator !== "undefined"
+      ? navigator.languages?.length
+        ? navigator.languages
+        : [navigator.language || "tr"]
+      : ["tr"];
+  for (const p of prefs) {
+    const code = String(p).slice(0, 2).toLowerCase();
+    if (LANGS.includes(code)) return setLang(code);
+  }
+  setLang("tr");
 }
 
+/**
+ * Geri düşüş zinciri: seçili dil → İngilizce → Türkçe → anahtar.
+ * ES/RU sözlükleri kasten kısa: çevirisi yazılmamış bir bölümü uydurmak yerine
+ * İngilizcesini göstermek doğru davranış (skill §5 — çeviri kokan metin yasak).
+ */
 export function t(key) {
-  return dict[lang][key] ?? dict.tr[key] ?? key;
+  return dict[lang]?.[key] ?? dict.en[key] ?? dict.tr[key] ?? key;
 }
