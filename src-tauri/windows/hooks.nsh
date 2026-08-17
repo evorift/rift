@@ -34,11 +34,21 @@
   ; artık crash-loop riski yok. 3 yeniden başlatma denemesi, 5 sn arayla; sayaç 1 günde (86400 sn) sıfırlanır.
   nsExec::ExecToLog 'sc failure EvoriftSvc reset= 86400 actions= restart/5000/restart/5000/restart/5000'
   nsExec::ExecToLog 'sc start EvoriftSvc'
-  ; Windows ile otomatik baslat: kontrol arayuzunu tray'e MINIMIZED ac (tum kullanicilar -> Startup kisayolu).
-  ; Bypass servisi zaten boot'ta otomatik (UI olmadan da calisir); bu yalnizca pencereyi tray'e getirir.
-  ; CreateShortcut bosluklu yolu (Program Files) sorunsuz isler -> tirnak kacis derdi yok.
+  ; --- Windows ile otomatik baslatma (DUZELTILDI 2026-08-16) ---------------------------------
+  ; Burada eskiden $SMSTARTUP'a bir kisayol olusturuluyordu. O kisayol HIC CALISMIYORDU:
+  ; evorift.exe'nin manifesti requireAdministrator (build.rs) ve Windows, Startup klasorunden ya da
+  ; Run anahtarindan baslatilan bir uygulamayi oturum acarken YUKSELTMEZ -- o yolda onay ekrani
+  ; yoktur, dolayisiyla baslatma sessizce basarisiz olur. Kullanicinin gordugu sey tam olarak buydu:
+  ; ayarlarda hicbir sey kapali degil, yine de yeniden baslatmadan sonra uygulama gelmiyor.
+  ;
+  ; Dogru mekanizma -RunLevel Highest ile kayitli bir zamanlanmis gorev (schtask.rs
+  ; create_logon_task). Onu UYGULAMA kendisi, kullanicinin kendi hesabi icin kaydeder -- kurulum
+  ; SYSTEM baglaminda calistigi icin buradan "hangi kullanici oturum acacak" bilinemez.
+  ; Bu yuzden burada sadece ESKI, calismayan kisayol temizlenir.
   SetShellVarContext all
-  CreateShortcut "$SMSTARTUP\evorift.lnk" "$INSTDIR\evorift.exe" "--minimized"
+  Delete "$SMSTARTUP\evorift.lnk"
+  SetShellVarContext current
+  Delete "$SMSTARTUP\evorift.lnk"
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
@@ -53,7 +63,19 @@
   nsExec::ExecToLog 'powershell -NoProfile -Command "Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object { $$_.Name -like ''evorift-*'' } | Remove-NetQosPolicy -Confirm:$$false"'
   ; Per-app firewall engel kurallarını kaldır (evorift-block-*).
   nsExec::ExecToLog 'powershell -NoProfile -Command "Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $$_.DisplayName -like ''evorift-block-*'' } | Remove-NetFirewallRule"'
-  ; Otomatik baslat kisayolunu kaldir.
+  ; Otomatik baslatma: hem eski (calismayan) kisayolu hem de yeni oturum-acma gorevini kaldir.
   SetShellVarContext all
   Delete "$SMSTARTUP\evorift.lnk"
+  SetShellVarContext current
+  Delete "$SMSTARTUP\evorift.lnk"
+  nsExec::ExecToLog 'schtasks /delete /tn EvoriftLogon /f'
+  ; Korumanin acilista geri gelmesini saglayan kalici durum dosyasi da gitsin -- kaldirilmis bir
+  ; uygulamanin bir sonraki kurulumda kendini kendiliginden acmasi surpriz olurdu.
+  ; SetShellVarContext all altinda $APPDATA = C:\ProgramData (servisin ipc::data_dir()'i ile ayni).
+  SetShellVarContext all
+  Delete "$APPDATA\evorift\state.json"
+  ; Loglar artik kurulum klasorunun icinde ($INSTDIR\logs, bkz. sys::log_dir). Kurulumdan SONRA
+  ; olusturuldugu icin kaldirici bunlari kendiliginden bilmez -> acikca sil, yoksa uygulama
+  ; kaldirildiktan sonra geride bir klasor kalir.
+  RMDir /r "$INSTDIR\logs"
 !macroend

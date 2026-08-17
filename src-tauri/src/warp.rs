@@ -42,6 +42,20 @@ pub const WARP_ENDPOINT: &str = "188.114.98.224:2408";
 /// WireGuard tünel adı (servis adı `WireGuardTunnel$warp`; conf dosya tabanı ile birebir olmalı).
 pub const TUNNEL_NAME: &str = "warp";
 
+/// Does the WireGuard tunnel SERVICE exist on this machine? 0 = not asked yet, 1 = yes, 2 = no.
+///
+/// Cached because the answer only changes when WE install or uninstall the tunnel, and asking costs
+/// a child process (`sc query`) on a code path — `Command::Stop` — that must feel instant.
+#[cfg(windows)]
+static TUNNEL_PRESENCE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TunnelPresence {
+    Present,
+    Absent,
+}
+
 // --- wgcf lifecycle (item 4.2): account/profile management, refresh, register-error handling ---
 
 /// wgcf account file (the WARP account) and profile file (full-tunnel raw conf). Both are persisted
@@ -294,6 +308,8 @@ impl WarpEngine {
                 // Dev/bundle yok: gerçek tünel yok ama UI↔IPC zinciri çalışsın (sim). Hata DÖNDÜRME.
                 eprintln!("[evorift][warp] bundle yok (wireguard.exe) — sim (gerçek tünel yok)");
                 self.running = true;
+        Self::set_tunnel_presence(TunnelPresence::Present);
+                Self::set_tunnel_presence(TunnelPresence::Present);
                 self.full = full;
                 return Ok(());
             }
@@ -309,12 +325,14 @@ impl WarpEngine {
         let conf = Self::ensure_config(full)?; // wgcf ile üret/oku (ağ gerekebilir; başarısızsa Err)
         Self::run_hidden(&exe, &["/installtunnelservice".into(), conf.to_string_lossy().into_owned()], None)?;
         self.running = true;
+        Self::set_tunnel_presence(TunnelPresence::Present);
         self.full = full;
         Ok(())
     }
     #[cfg(not(windows))]
     pub fn start(&mut self, full: bool) -> Result<(), String> {
         self.running = true;
+        Self::set_tunnel_presence(TunnelPresence::Present);
         self.full = full;
         Ok(())
     }
@@ -322,11 +340,25 @@ impl WarpEngine {
     /// Tüneli kapat: `wireguard.exe /uninstalltunnelservice warp` (best-effort).
     #[cfg(windows)]
     pub fn stop(&mut self) {
+        // SPEED (2026-08-16): this used to spawn `wireguard.exe /uninstalltunnelservice`
+        // UNCONDITIONALLY, under the engine lock, on every single `Command::Stop` — including the
+        // overwhelmingly common case where no tunnel was ever created (the tunnel is opt-in, and VPN
+        // mode is not even enabled today). That is a child process with a 10s timeout on the path
+        // the user experiences as "turn protection off".
+        //
+        // Now: ask the OS once per process whether the tunnel service exists at all, remember the
+        // answer, and skip both calls when it does not. Correctness is preserved because the cached
+        // "absent" answer is only ever set after an uninstall or a negative query, and `start()`
+        // resets it — so a tunnel that DOES exist is always still torn down.
+        if !self.running && Self::tunnel_state() == TunnelPresence::Absent {
+            return;
+        }
         if let Some(exe) = Self::wireguard_exe() {
             if exe.exists() {
                 let _ = Self::run_hidden(&exe, &["/uninstalltunnelservice".into(), TUNNEL_NAME.into()], None);
             }
         }
+        Self::set_tunnel_presence(TunnelPresence::Absent);
         self.running = false;
     }
     #[cfg(not(windows))]
@@ -366,6 +398,32 @@ impl WarpEngine {
     fn tunnel_installed() -> bool {
         let svc = format!("WireGuardTunnel${TUNNEL_NAME}");
         Self::run_hidden_status("sc", &["query".into(), svc])
+    }
+
+    /// Cached answer to "does the WireGuard tunnel service exist", so the hot Stop path does not
+    /// spawn `sc query` (let alone `wireguard.exe`) every time.
+    #[cfg(windows)]
+    fn tunnel_state() -> TunnelPresence {
+        match TUNNEL_PRESENCE.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => TunnelPresence::Present,
+            2 => TunnelPresence::Absent,
+            _ => {
+                // Unknown → ask the OS exactly once, then remember.
+                let present = Self::tunnel_installed();
+                let state = if present { TunnelPresence::Present } else { TunnelPresence::Absent };
+                Self::set_tunnel_presence(state);
+                state
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn set_tunnel_presence(state: TunnelPresence) {
+        let v = match state {
+            TunnelPresence::Present => 1u8,
+            TunnelPresence::Absent => 2u8,
+        };
+        TUNNEL_PRESENCE.store(v, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// warp.conf'u garanti et. Varsa olduğu gibi kullan (per-install özel anahtar kalıcı). Yoksa:

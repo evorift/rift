@@ -137,6 +137,19 @@ if ($missing.Count -gt 0) {
     Save-Summary
     exit 1
 }
+# Exclusive-control guard: every measurement here assumes THIS job is the only thing driving
+# evorift-svc/winws. A pre-existing instance this job didn't start means an unknown prior state
+# (unknown strategy, unknown app_modes/full_warp) is already live -- proceeding would silently
+# mix that state into the sweep. Abort rather than produce an invalid number (P0-e, BACKLOG.md).
+$preexisting = Get-Process -Name "evorift-svc", "winws" -ErrorAction SilentlyContinue
+if ($preexisting) {
+    $list = ($preexisting | ForEach-Object { "$($_.ProcessName) pid=$($_.Id) started=$($_.StartTime)" }) -join "; "
+    Step "exclusive control" $false "evorift-svc/winws already running before this job started ($list) -- ABORTING, every measurement here requires exclusive control"
+    Save-Summary
+    exit 1
+}
+Step "exclusive control" $true "no pre-existing evorift-svc/winws process found"
+
 "repeats,label,target,ok,ms,error" | Out-File -FilePath $sweepLog -Encoding ascii
 
 $svcProc = $null

@@ -3,6 +3,7 @@ pub mod byedpi;
 pub mod client;
 pub mod dns;
 pub mod drover;
+pub mod elog;
 pub mod engine;
 pub mod firewall;
 pub mod goodbyedpi;
@@ -19,10 +20,12 @@ pub mod proxifyre;
 pub mod repair;
 pub mod rollback;
 pub mod schtask;
+pub mod secure;
 pub mod service;
 pub mod services;
 pub mod svcctl;
 pub mod sys;
+pub mod tuner;
 /// Remote test agent (`evorift-testd` binary only — the app never references it).
 pub mod testd;
 pub mod tweak;
@@ -431,6 +434,70 @@ async fn set_protection_mode(mode: String) -> Result<EngineStatus, String> {
     status_cmd(Command::SetProtectionMode { mode }).await
 }
 
+/// Measure the strategy ladder on this line and deploy the winner. Blocking on the service side
+/// (tens of seconds); returns the full score table as JSON so the UI can show WHY a chain was
+/// chosen instead of presenting it as magic.
+#[tauri::command]
+async fn tune_line(targets: Vec<String>) -> Result<String, String> {
+    data_cmd(Command::Tune { targets }).await
+}
+
+/// Structured engine events newer than `since`. This is the channel that makes an engine failure
+/// visible in the UI at all — before it existed, an error that happened outside a direct command
+/// call (watchdog respawn failure, DNS drift, winws dying) reached nothing the user could see.
+#[tauri::command]
+async fn engine_events(since: u64) -> Result<String, String> {
+    data_cmd(Command::Events { since }).await
+}
+
+/// Should protection come back up on its own when Windows starts?
+#[tauri::command]
+async fn set_auto_protect(enable: bool) -> Result<EngineStatus, String> {
+    status_cmd(Command::SetAutoStart { enable }).await
+}
+
+/// Delete everything stored locally. Returns `{removed, remaining}` so the UI reports what
+/// actually went, rather than assuming the click worked.
+#[tauri::command]
+async fn wipe_local_data() -> Result<String, String> {
+    data_cmd(Command::WipeLocalData).await
+}
+
+/// Extra domains the user wants covered by the wide (Güçlü) scope.
+#[tauri::command]
+async fn set_extra_domains(domains: Vec<String>) -> Result<EngineStatus, String> {
+    status_cmd(Command::SetExtraDomains { domains }).await
+}
+
+/// Is the at-logon launch task actually registered? Read from the OS, not from a remembered flag —
+/// the Settings toggle used to display whatever it last wrote, which could disagree with reality.
+#[tauri::command]
+async fn autostart_enabled() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(crate::schtask::logon_task_exists)
+        .await
+        .map_err(|e| format!("task error: {e}"))
+}
+
+/// The folder where every log ends up — `<install dir>\logs`, beside the app's own files.
+#[tauri::command]
+fn log_folder() -> String {
+    crate::sys::log_dir().to_string_lossy().into_owned()
+}
+
+/// Open that folder in Explorer — one click from the UI, so "send me your logs" is answerable by a
+/// user who has never heard of ProgramData.
+#[tauri::command]
+fn open_log_folder() -> Result<(), String> {
+    let dir = crate::sys::log_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    hidden_command("explorer")
+        .arg(dir.as_os_str())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not open the log folder: {e}"))
+}
+
+
 #[tauri::command]
 async fn set_strategy(id: String, repeats_override: Option<u32>) -> Result<EngineStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -795,11 +862,28 @@ async fn stop_svc() -> Result<(), String> {
             .args(["stop", svcctl::SERVICE_NAME])
             .output()
             .map_err(|e| format!("sc stop çalıştırılamadı: {e}"))?;
-        if out.status.success() || String::from_utf8_lossy(&out.stdout).contains("STOPPED") {
-            Ok(())
-        } else {
-            Err(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        // `sc stop` returns as soon as the SCM has ACCEPTED the request — the service is normally
+        // still STOP_PENDING at that moment. Returning Ok here was optimistic success: the button
+        // reported "stopped" while the service was still running, and a status refresh a moment
+        // later would contradict it. Wait for the state to actually reach STOPPED.
+        if out.status.success() || String::from_utf8_lossy(&out.stdout).contains("STOP") {
+            for _ in 0..20 {
+                match svcctl::status() {
+                    "stopped" | "absent" => return Ok(()),
+                    _ => std::thread::sleep(std::time::Duration::from_millis(250)),
+                }
+            }
+            return Err(format!(
+                "the service did not stop (state: {}) — something may be holding it open",
+                svcctl::status()
+            ));
         }
+        // Already stopped is not a failure: `sc stop` errors with 1062 ("service has not been
+        // started"), which for a button labelled "stop the service" is the desired end state.
+        if svcctl::status() == "stopped" || svcctl::status() == "absent" {
+            return Ok(());
+        }
+        Err(String::from_utf8_lossy(&out.stdout).trim().to_string())
     })
     .await
     .map_err(|e| format!("görev hatası: {e}"))?
@@ -833,31 +917,48 @@ async fn set_autostart(enable: bool, minimized: bool) -> Result<(), String> {
         .map_err(|e| format!("görev hatası: {e}"))?
 }
 
-fn set_autostart_blocking(enable: bool, minimized: bool) -> Result<(), String> {
+fn set_autostart_blocking(enable: bool, _minimized: bool) -> Result<(), String> {
     const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-    if enable {
-        let exe = std::env::current_exe().map_err(|e| format!("exe yolu alınamadı: {e}"))?;
-        let exe = exe.to_string_lossy();
-        let val = if minimized {
-            format!("\"{exe}\" --minimized")
-        } else {
-            format!("\"{exe}\"")
-        };
-        let out = hidden_command("reg")
-            .args(["add", RUN_KEY, "/v", "evorift", "/t", "REG_SZ", "/d", &val, "/f"])
-            .output()
-            .map_err(|e| format!("reg çalıştırılamadı: {e}"))?;
-        if out.status.success() {
+
+    // FIXED 2026-08-16. This used to write ONLY the Run key, and the installer separately dropped a
+    // Startup-folder shortcut. Both point at `evorift.exe`, which build.rs manifests as
+    // `requireAdministrator` — and Windows does not elevate Run-key or Startup-folder items at
+    // logon. There is no consent prompt in that path, so the launch fails silently. The toggle said
+    // "on", the registry entry existed, and the app still never appeared after a reboot.
+    //
+    // A scheduled task registered with -RunLevel Highest is the supported way to auto-launch an
+    // elevated app: elevation is authorised once at registration (we are already admin here), not
+    // at each logon. The stale Run key is removed either way so the two mechanisms cannot disagree.
+    let _ = hidden_command("reg").args(["delete", RUN_KEY, "/v", "evorift", "/f"]).output();
+
+    if !enable {
+        return crate::schtask::delete_logon_task();
+    }
+
+    let exe = std::env::current_exe().map_err(|e| format!("could not resolve the exe path: {e}"))?;
+    let exe = exe.to_string_lossy().into_owned();
+    // DOMAIN\user of the account this UI is running as — the task must be registered for the
+    // logging-in user, not for whoever happens to install later.
+    let user = current_user_name();
+    match crate::schtask::create_logon_task(&exe, &user) {
+        Ok(()) => {
+            crate::elog::info("ui", "autostart_on", &format!("evorift will start at logon for {user}"));
             Ok(())
-        } else {
-            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
         }
-    } else {
-        // anahtar yoksa hata önemsiz → yut
-        let _ = hidden_command("reg")
-            .args(["delete", RUN_KEY, "/v", "evorift", "/f"])
-            .output();
-        Ok(())
+        Err(m) => {
+            crate::elog::error("ui", "autostart_failed", &format!("logon task not registered: {m}"));
+            Err(m)
+        }
+    }
+}
+
+/// `DOMAIN\user` for the current process. Falls back to `USERNAME` alone, which
+/// `New-ScheduledTaskPrincipal` also accepts for a local account.
+fn current_user_name() -> String {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    match std::env::var("USERDOMAIN") {
+        Ok(d) if !d.is_empty() && !user.is_empty() => format!("{d}\\{user}"),
+        _ => user,
     }
 }
 
@@ -1107,6 +1208,38 @@ pub fn run() {
                 std::thread::sleep(std::time::Duration::from_millis(1000));
             });
 
+            // ---- Engine events → UI, and every log → the user's Desktop ------------------------
+            //
+            // Engine failures raised OUTSIDE a direct command call (winws dying, a watchdog respawn
+            // failing, DNS drifting back to the ISP resolver) had no path to the screen at all —
+            // the only Rust→UI channels were `telemetry` and `tray-toggle`. This polls the service
+            // for events newer than the cursor and pushes them to the UI. 2s is fast enough that a
+            // problem appears while the user is still looking at what caused it.
+            //
+            // No log mirroring any more: both binaries now write straight into <install dir>\logs,
+            // so there is one directory and no copy that can lag behind it.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let mut cursor: u64 = 0;
+                loop {
+                    if let Ok(json) = client::command_data(Command::Events { since: cursor }) {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+                            if let Some(w) = v.get("watermark").and_then(|w| w.as_u64()) {
+                                // Only advance on a successful read: a failed poll must not skip
+                                // the events it never saw.
+                                cursor = w;
+                            }
+                            if let Some(events) = v.get("events") {
+                                if events.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+                                    let _ = handle.emit("engine-events", events.clone());
+                                }
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            });
+
 
 
             Ok(())
@@ -1165,7 +1298,15 @@ pub fn run() {
             restart_engine,
             create_log_bundle,
             health,
-            tunnel_status
+            tunnel_status,
+            tune_line,
+            engine_events,
+            set_auto_protect,
+            set_extra_domains,
+            wipe_local_data,
+            autostart_enabled,
+            log_folder,
+            open_log_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

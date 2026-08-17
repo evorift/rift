@@ -1,6 +1,6 @@
 [package]
 name = "evorift"
-version = "0.1.8"
+version = "0.3.1"
 description = "Unblock Discord, Roblox & games without a VPN (Windows DPI-bypass)."
 authors = ["evorift"]
 edition = "2021"
@@ -47,7 +47,7 @@ getrandom = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
 # admin (elevation) tespiti — gerçek sistem komutları yalnız yükseltilmiş süreçte çalışır
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemInformation", "Win32_Security_Cryptography"] }
 # named-pipe SDDL ACL (P7 A0): LocalSystem servisi pipe'ı açarken interaktif kullanıcıya erişim verir →
 # non-admin app bağlanabilir (yoksa "Access is denied"). interprocess SecurityDescriptor::deserialize(&U16CStr).
 widestring = "1"

@@ -4,7 +4,7 @@
 //! bearer token is deliberately NOT in here — it lives in its own ACL'd file under `state_dir`
 //! (see [`super::token`]) so this file stays safe to read, diff and paste into a bug report.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::path::{Path, PathBuf};
 
 /// Why a config was refused. Every variant is a hard startup failure: an agent that binds the
@@ -19,6 +19,9 @@ pub enum ConfigError {
     /// put a remote-execution endpoint on a publicly routable address.
     BindNotLocal(IpAddr),
     BindNotAnAddress(String),
+    /// `bind_ip` was `"auto"` but the routing table could not name a local address that reaches
+    /// the controller — usually the network is down entirely.
+    AutoBindFailed { toward: IpAddr },
     /// Port 0 would let the OS pick a port the firewall rule does not cover.
     PortNotFixed,
     AllowlistEmpty,
@@ -51,7 +54,13 @@ impl std::fmt::Display for ConfigError {
                 "bind_ip {ip} is not a loopback/private/link-local address — refusing to expose \
                  the test agent on a publicly routable address"
             ),
-            Self::BindNotAnAddress(s) => write!(f, "bind_ip {s:?} is not an IP address"),
+            Self::BindNotAnAddress(s) => {
+                write!(f, "bind_ip {s:?} is not an IP address (use \"auto\" to follow DHCP)")
+            }
+            Self::AutoBindFailed { toward } => write!(
+                f,
+                "bind_ip is \"auto\" but no local address routes toward {toward} — is the network up?"
+            ),
             Self::PortNotFixed => write!(f, "port must be a fixed non-zero port"),
             Self::AllowlistEmpty => write!(f, "allowlist is empty — no controller could connect"),
             Self::AllowlistEntryNotAnAddress(s) => {
@@ -115,8 +124,12 @@ fn default_job_timeout_secs() -> u64 {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind_ip: IpAddr,
+    /// True when `bind_ip` was resolved from `"auto"` rather than written literally. The server
+    /// only watches for address changes in that case — a literal address is the operator saying
+    /// "this one, and fail loudly if it is gone".
+    pub bind_auto: bool,
     pub port: u16,
-    pub allowlist: Vec<IpAddr>,
+    pub allowlist: Vec<AllowEntry>,
     pub sandbox_root: PathBuf,
     pub state_dir: PathBuf,
     pub deadman_secs: u64,
@@ -150,6 +163,94 @@ pub fn is_local_scope(ip: IpAddr) -> bool {
     }
 }
 
+/// Which local address would this machine use to reach `toward`?
+///
+/// The routing table already knows the answer, and asking it is far more robust than hard-coding
+/// an address that DHCP will eventually move. A `connect` on a UDP socket sends no packets at
+/// all — it only fixes the destination so the OS selects a source address — so this is a pure
+/// lookup with no traffic and no dependency on the peer being up.
+///
+/// This exists because a hard-coded `bind_ip` broke the whole setup the first time the laptop's
+/// lease changed: the agent stayed bound to an address the machine no longer had, the firewall
+/// rule still pinned the old one, and the controller was dialling a third. One lease renewal,
+/// three broken things.
+pub fn local_address_toward(toward: IpAddr) -> Option<IpAddr> {
+    let bind: &str = match toward {
+        IpAddr::V4(_) => "0.0.0.0:0",
+        IpAddr::V6(_) => "[::]:0",
+    };
+    let socket = UdpSocket::bind(bind).ok()?;
+    // Port 9 (discard) is arbitrary; nothing is transmitted.
+    socket.connect((toward, 9)).ok()?;
+    socket.local_addr().ok().map(|a| a.ip())
+}
+
+/// An allowlist entry: a single address, or a CIDR range.
+///
+/// Ranges matter because the *controller* can move too. Widening the source filter to the LAN is
+/// acceptable precisely because it was never the security boundary — the bearer token is. A
+/// filter that silently stops matching after a DHCP renewal is worse than a slightly broader one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AllowEntry {
+    Exact(IpAddr),
+    Cidr { network: IpAddr, prefix: u8 },
+}
+
+impl AllowEntry {
+    /// Parse `192.168.1.24` or `192.168.1.0/24`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        match text.split_once('/') {
+            None => text.parse().ok().map(|ip| Self::Exact(normalize_peer(ip))),
+            Some((addr, prefix)) => {
+                let network: IpAddr = addr.trim().parse().ok()?;
+                let prefix: u8 = prefix.trim().parse().ok()?;
+                let max = if network.is_ipv4() { 32 } else { 128 };
+                if prefix > max {
+                    return None;
+                }
+                Some(Self::Cidr { network, prefix })
+            }
+        }
+    }
+
+    pub fn matches(&self, peer: IpAddr) -> bool {
+        let peer = normalize_peer(peer);
+        match self {
+            Self::Exact(ip) => *ip == peer,
+            Self::Cidr { network, prefix } => match (network, peer) {
+                (IpAddr::V4(net), IpAddr::V4(p)) => {
+                    let (net, p) = (u32::from(*net), u32::from(p));
+                    // A /0 must not shift by 32 — that is undefined behaviour for u32.
+                    if *prefix == 0 {
+                        return true;
+                    }
+                    let mask = u32::MAX << (32 - prefix);
+                    (net & mask) == (p & mask)
+                }
+                (IpAddr::V6(net), IpAddr::V6(p)) => {
+                    let (net, p) = (u128::from(*net), u128::from(p));
+                    if *prefix == 0 {
+                        return true;
+                    }
+                    let mask = u128::MAX << (128 - prefix);
+                    (net & mask) == (p & mask)
+                }
+                _ => false,
+            },
+        }
+    }
+}
+
+/// The address to aim `"auto"` bind resolution at: the first allowlist entry, using a range's
+/// network address, which is on the same link and so selects the same source address.
+fn hint_from(entries: &[AllowEntry]) -> Option<IpAddr> {
+    entries.first().map(|e| match e {
+        AllowEntry::Exact(ip) => *ip,
+        AllowEntry::Cidr { network, .. } => *network,
+    })
+}
+
 /// Collapse `::ffff:a.b.c.d` to `a.b.c.d` so an allowlist written in IPv4 still matches a peer
 /// that arrived over a dual-stack socket. Without this, a dual-stack bind would 403 the
 /// controller for reasons that look like nothing at all from the outside.
@@ -170,7 +271,15 @@ impl Config {
             path: path.to_path_buf(),
             source,
         })?;
-        let raw: RawConfig = serde_json::from_str(&text).map_err(|e| ConfigError::Malformed {
+        // Strip a UTF-8 byte-order mark before parsing.
+        //
+        // Not defensive padding — this was a real, total failure. Windows PowerShell 5.1's
+        // `Out-File -Encoding utf8` always writes a BOM, so the installer's own config could not
+        // be parsed: serde_json sees U+FEFF where it expects `{` and rejects the file. The agent
+        // then died before opening its audit log, so the service reported "Running" with no log
+        // anywhere explaining why nothing was listening. Any hand-edit in Notepad reintroduces it.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        let raw: RawConfig = serde_json::from_str(text).map_err(|e| ConfigError::Malformed {
             path: path.to_path_buf(),
             detail: e.to_string(),
         })?;
@@ -178,17 +287,6 @@ impl Config {
     }
 
     fn from_raw(raw: RawConfig) -> Result<Self, ConfigError> {
-        let bind_ip: IpAddr = raw
-            .bind_ip
-            .trim()
-            .parse()
-            .map_err(|_| ConfigError::BindNotAnAddress(raw.bind_ip.clone()))?;
-        if bind_ip.is_unspecified() {
-            return Err(ConfigError::BindUnspecified);
-        }
-        if !is_local_scope(bind_ip) {
-            return Err(ConfigError::BindNotLocal(bind_ip));
-        }
         if raw.port == 0 {
             return Err(ConfigError::PortNotFixed);
         }
@@ -198,14 +296,34 @@ impl Config {
         }
         let mut allowlist = Vec::with_capacity(raw.allowlist.len());
         for entry in &raw.allowlist {
-            let ip: IpAddr = entry
+            let parsed = AllowEntry::parse(entry)
+                .ok_or_else(|| ConfigError::AllowlistEntryNotAnAddress(entry.clone()))?;
+            if let AllowEntry::Exact(ip) = parsed {
+                if ip.is_unspecified() {
+                    return Err(ConfigError::AllowlistEntryUnspecified(ip));
+                }
+            }
+            allowlist.push(parsed);
+        }
+
+        // Resolve the bind address AFTER the allowlist, because "auto" means "whichever local
+        // address routes toward the controller" and the controller is the allowlist.
+        let wants_auto = raw.bind_ip.trim().eq_ignore_ascii_case("auto");
+        let bind_ip: IpAddr = if wants_auto {
+            let toward = hint_from(&allowlist).ok_or(ConfigError::AllowlistEmpty)?;
+            local_address_toward(toward).ok_or(ConfigError::AutoBindFailed { toward })?
+        } else {
+            raw.bind_ip
                 .trim()
                 .parse()
-                .map_err(|_| ConfigError::AllowlistEntryNotAnAddress(entry.clone()))?;
-            if ip.is_unspecified() {
-                return Err(ConfigError::AllowlistEntryUnspecified(ip));
-            }
-            allowlist.push(normalize_peer(ip));
+                .map_err(|_| ConfigError::BindNotAnAddress(raw.bind_ip.clone()))?
+        };
+
+        if bind_ip.is_unspecified() {
+            return Err(ConfigError::BindUnspecified);
+        }
+        if !is_local_scope(bind_ip) {
+            return Err(ConfigError::BindNotLocal(bind_ip));
         }
 
         let sandbox_root = PathBuf::from(raw.sandbox_root);
@@ -230,6 +348,7 @@ impl Config {
 
         Ok(Self {
             bind_ip,
+            bind_auto: wants_auto,
             port: raw.port,
             allowlist,
             sandbox_root,
@@ -246,8 +365,13 @@ impl Config {
     /// a host on the same LAN can spoof the controller's address. It is why every endpoint except
     /// `/health` also demands the bearer token. See docs/REMOTE-TESTING.md.
     pub fn is_allowed(&self, peer: IpAddr) -> bool {
-        let peer = normalize_peer(peer);
-        self.allowlist.contains(&peer)
+        self.allowlist.iter().any(|entry| entry.matches(peer))
+    }
+
+    /// The address the allowlist points at, used to re-resolve an `"auto"` bind. `None` when the
+    /// allowlist holds only ranges with no usable target.
+    pub fn controller_hint(&self) -> Option<IpAddr> {
+        hint_from(&self.allowlist)
     }
 }
 
@@ -342,6 +466,61 @@ mod tests {
         assert!(!cfg.is_allowed("100.99.99.99".parse::<IpAddr>().expect("literal")));
     }
 
+    /// The scenario that cost a day: both machines got new DHCP leases at once, so the literal
+    /// bind address, the literal allowlist entry and the controller's target were all stale
+    /// simultaneously. `"auto"` plus a CIDR allowlist survives exactly that.
+    #[test]
+    fn auto_bind_follows_the_route_and_a_cidr_allowlist_survives_dhcp() {
+        // A range covers the controller wherever DHCP puts it on that LAN.
+        let entry = AllowEntry::parse("192.168.1.0/24").expect("valid CIDR");
+        assert!(entry.matches("192.168.1.24".parse().expect("literal")), "old controller address");
+        assert!(entry.matches("192.168.1.17".parse().expect("literal")), "new controller address");
+        assert!(!entry.matches("192.168.2.17".parse().expect("literal")), "a different LAN");
+
+        // "auto" resolves against the real routing table; loopback is always routable, so this
+        // asserts the mechanism without depending on which network the test machine is on.
+        let resolved = local_address_toward("127.0.0.1".parse().expect("literal"))
+            .expect("the routing table must name a source address for loopback");
+        assert!(resolved.is_loopback(), "toward loopback the source must be loopback, got {resolved}");
+
+        let mut r = raw("auto", &["127.0.0.0/8"]);
+        r.state_dir = r"C:\ProgramData\evorift-testd".to_string();
+        let cfg = Config::from_raw(r).expect("an auto config must resolve");
+        assert!(cfg.bind_auto, "must remember it was auto, so the watcher runs");
+        assert!(cfg.bind_ip.is_loopback());
+        assert_eq!(cfg.controller_hint(), Some("127.0.0.0".parse().expect("literal")));
+    }
+
+    #[test]
+    fn allowlist_entries_parse_as_addresses_or_ranges() {
+        assert_eq!(
+            AllowEntry::parse("192.168.1.24"),
+            Some(AllowEntry::Exact("192.168.1.24".parse().expect("literal")))
+        );
+        match AllowEntry::parse("10.0.0.0/8").expect("valid") {
+            AllowEntry::Cidr { prefix, .. } => assert_eq!(prefix, 8),
+            other => panic!("expected a CIDR, got {other:?}"),
+        }
+        // A /0 must not shift a u32 by 32 (undefined behaviour) -- it matches everything.
+        assert!(AllowEntry::parse("0.0.0.0/0").expect("valid").matches("8.8.8.8".parse().expect("literal")));
+        // /32 is a single host.
+        let single = AllowEntry::parse("192.168.1.24/32").expect("valid");
+        assert!(single.matches("192.168.1.24".parse().expect("literal")));
+        assert!(!single.matches("192.168.1.25".parse().expect("literal")));
+        // Nonsense is rejected rather than silently widened.
+        assert_eq!(AllowEntry::parse("192.168.1.0/33"), None);
+        assert_eq!(AllowEntry::parse("not-an-ip"), None);
+        assert_eq!(AllowEntry::parse("192.168.1.0/abc"), None);
+    }
+
+    #[test]
+    fn a_cidr_allowlist_still_rejects_outsiders() {
+        let cfg = Config::from_raw(raw("192.168.1.18", &["192.168.1.0/24"])).expect("valid");
+        assert!(cfg.is_allowed("192.168.1.17".parse().expect("literal")));
+        assert!(!cfg.is_allowed("192.168.9.17".parse().expect("literal")));
+        assert!(!cfg.is_allowed("8.8.8.8".parse().expect("literal")));
+    }
+
     #[test]
     fn refuses_an_empty_allowlist() {
         assert!(matches!(
@@ -380,6 +559,37 @@ mod tests {
         let cfg = Config::from_raw(raw("192.168.1.50", &["192.168.1.20"])).expect("valid");
         let mapped: IpAddr = "::ffff:192.168.1.20".parse().expect("literal");
         assert!(cfg.is_allowed(mapped));
+    }
+
+    /// Regression: PowerShell 5.1 `Out-File -Encoding utf8` emits a BOM, and the agent could not
+    /// read its own installer's config. Cost a full round trip to the laptop to diagnose,
+    /// because the failure happened before the audit log existed.
+    #[test]
+    fn a_config_written_with_a_utf8_bom_still_loads() {
+        let dir = std::env::temp_dir().join("evorift-testd-bom-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("testd.config.json");
+
+        let json = r#"{"bind_ip":"192.168.1.25","port":8765,"allowlist":["192.168.1.24"],
+                       "sandbox_root":"C:\\evorift-test","state_dir":"C:\\ProgramData\\evorift-testd",
+                       "deadman_secs":120}"#;
+
+        // Exactly what Out-File -Encoding utf8 produces: EF BB BF then the document.
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(json.as_bytes());
+        std::fs::write(&path, &bytes).expect("write BOM config");
+
+        let cfg = Config::load(&path).expect("a BOM-prefixed config must still load");
+        assert_eq!(cfg.port, 8765);
+        assert_eq!(cfg.bind_ip, "192.168.1.25".parse::<IpAddr>().expect("literal"));
+
+        // And the same document without a BOM must be identical, not merely also-accepted.
+        std::fs::write(&path, json.as_bytes()).expect("write plain config");
+        let plain = Config::load(&path).expect("plain config loads");
+        assert_eq!(plain.bind_ip, cfg.bind_ip);
+        assert_eq!(plain.allowlist, cfg.allowlist);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]

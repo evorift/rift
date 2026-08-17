@@ -100,15 +100,144 @@ struct Engine {
     /// Bumped on every Start/Stop/restart. A background probe checks this before writing its result
     /// back, so a slow probe from a session the user already stopped/restarted can't clobber newer state.
     verify_gen: u64,
+
+    // ---- Added 2026-08-16 --------------------------------------------------------------------
+    /// Active user-facing mode ("hafif" | "guclu"). Lives HERE, not only in the UI's localStorage:
+    /// the service is the one that knows what is actually loaded, and the two used to disagree
+    /// after any service restart.
+    mode: String,
+    /// Last full probe report (targets + control). Drives the UI's per-site coverage list and the
+    /// harm verdict; `None` until the first probe completes.
+    probe: Option<crate::verify::ProtectionReport>,
+    /// "" (never measured) | "tuning" | "tuned" | "gave_up".
+    tuning: String,
+    /// Live measurement progress, so the UI can say "3/7" instead of spinning silently for half a
+    /// minute. A user who cannot tell progress from a hang assumes a hang.
+    tuning_step: u32,
+    tuning_total: u32,
+    /// Domains the user added on top of the shipped wide list.
+    extra_domains: Vec<String>,
+    /// Should protection come back up on its own at boot? Persisted; see `PersistedState`.
+    autostart: bool,
+    /// Rate-limit for automatic re-tuning, so a genuinely blocked line cannot turn into a
+    /// tune-restart-tune loop that never lets a connection live.
+    last_auto_tune: Option<Instant>,
+    /// Catch-all fallback layer id for the CURRENT plan (see `current_strategy`). Empty = none.
+    fallback: &'static str,
+    /// How many times harm has forced a fallback in this session. Bounded so a line that is broken
+    /// for reasons of its own cannot drive an endless revert/restart loop.
+    harm_reverts: u8,
+    /// Is a DPI child process supposed to be alive right now?
+    ///
+    /// False for DNS-only protection — the case where measurement said the honest action is to
+    /// touch no packets at all. Without this flag, "is the engine running" collapses into "is
+    /// winws alive", and a correctly-configured DNS-only line would report itself broken.
+    dpi_expected: bool,
+}
+
+/// What survives a reboot.
+///
+/// The absence of this file was the whole of the "I restarted my PC and evorift did not come back"
+/// report: `serve_blocking()` came up Idle with nothing to restore, deliberately, because the
+/// earlier unconditional boot-auto-protect had no user setting to gate it (the P0-e fix). The
+/// setting is the missing half — with it, restoring the user's last choice is not a surprise, it is
+/// the thing they asked for.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+struct PersistedState {
+    /// Was protection ON when we last shut down?
+    #[serde(default)]
+    running: bool,
+    /// Last user-facing mode.
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    dns: String,
+    /// Master switch for restoring the above at boot. Default TRUE: a user who turned protection on
+    /// and rebooted expects it on. Turning it off is one toggle away and is remembered.
+    #[serde(default = "yes")]
+    autostart: bool,
+    #[serde(default)]
+    extra_domains: Vec<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The persisted state, DPAPI-encrypted (see `secure`). Holds `extra_domains` — the domains the
+/// USER added, which is the only genuinely personal data this app keeps.
+fn state_path() -> std::path::PathBuf {
+    ipc::data_dir().join("state.bin")
+}
+
+/// The plaintext file this used to be. Read once, migrated, deleted — never written again.
+fn legacy_state_path() -> std::path::PathBuf {
+    ipc::data_dir().join("state.json")
+}
+
+fn defaults() -> PersistedState {
+    PersistedState { autostart: true, ..Default::default() }
+}
+
+fn load_state() -> PersistedState {
+    if let Some(bytes) = crate::secure::read_encrypted(&state_path()) {
+        return serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            crate::elog::warn("service", "state_parse", &format!("stored state unreadable, using defaults: {e}"));
+            defaults()
+        });
+    }
+
+    // MIGRATION: an install from before the store was encrypted left a plaintext state.json
+    // containing the user's added domains. Read it once, re-save it encrypted, and DELETE it —
+    // leaving it behind would mean the encryption changed nothing for existing users, which is the
+    // usual way a privacy fix quietly fails to apply to the people who already have the data.
+    let legacy = legacy_state_path();
+    if let Ok(s) = std::fs::read_to_string(&legacy) {
+        let parsed: PersistedState = serde_json::from_str(&s).unwrap_or_else(|_| defaults());
+        if let Ok(json) = serde_json::to_vec(&parsed) {
+            if crate::secure::write_encrypted(&state_path(), &json).is_ok() {
+                let _ = std::fs::remove_file(&legacy);
+                crate::elog::info(
+                    "service",
+                    "state_migrated",
+                    "settings moved into the encrypted local store; the old plaintext file was deleted",
+                );
+            }
+        }
+        return parsed;
+    }
+
+    // Absent on first run — not an error, just "nothing chosen yet".
+    defaults()
+}
+
+/// Persist the parts of the engine that must outlive the process. Write-then-rename so a crash
+/// mid-write cannot leave a half-file that parses as "protection was off".
+fn save_state(e: &Engine) {
+    let st = PersistedState {
+        running: e.running,
+        mode: e.mode.clone(),
+        dns: e.dns.clone(),
+        autostart: e.autostart,
+        extra_domains: e.extra_domains.clone(),
+    };
+    let Ok(json) = serde_json::to_vec(&st) else { return };
+    // Encrypted + ACL-restricted + atomic, all inside write_encrypted. If encryption is unavailable
+    // this FAILS rather than falling back to a plaintext write — a store that silently degrades is
+    // worse than one that reports it could not protect the data.
+    if let Err(err) = crate::secure::write_encrypted(&state_path(), &json) {
+        crate::elog::warn("service", "state_save", &format!("could not persist state: {err}"));
+    }
 }
 
 impl Engine {
     fn new() -> Self {
+        let persisted = load_state();
         Self {
             running: false,
             state: RunState::Idle,
             strategy: String::new(),
-            dns: String::new(),
+            dns: persisted.dns.clone(),
             engine_id: "zapret".into(),
             hostlist: Vec::new(),
             limits: std::collections::HashMap::new(),
@@ -122,6 +251,111 @@ impl Engine {
             metrics_at: None,
             verify: VerifyState::Unverified,
             verify_gen: 0,
+            mode: if persisted.mode.is_empty() { "hafif".into() } else { persisted.mode },
+            probe: None,
+            tuning: String::new(),
+            tuning_step: 0,
+            tuning_total: 0,
+            extra_domains: persisted.extra_domains,
+            autostart: persisted.autostart,
+            last_auto_tune: None,
+            fallback: "",
+            harm_reverts: 0,
+            dpi_expected: false,
+        }
+    }
+
+    /// Resolve the user-facing mode into the concrete (strategy, hostlist) the engine runs.
+    ///
+    /// This is the single place a mode becomes packets, which is what the old code lacked — the two
+    /// modes each hand-assigned four fields at their call site, and Güçlü's assignment
+    /// (`hostlist_only = false`) is what silently turned a route-dependent forgery into a
+    /// machine-wide catch-all.
+    fn plan_for_mode(&self, mode: &str) -> (engine::Strategy, Vec<String>) {
+        match mode {
+            "guclu" => {
+                let mut hosts: Vec<String> = WIDE_HOSTLIST.iter().map(|s| s.to_string()).collect();
+                for d in &self.extra_domains {
+                    if !hosts.iter().any(|h| h == d) {
+                        hosts.push(d.clone());
+                    }
+                }
+                let id = Self::tuned_strategy_id();
+                let mut s = engine::strategy_by_id(&id);
+                s.hostlist_only = true;
+                // "off" won the measurement, which means the bare line already opened everything —
+                // and it was MEASURED bare, with no fallback layer (tuner::candidate_strategy). So
+                // deploying a catch-all layer here would ship a configuration nobody tested, and
+                // would put TCP segmentation on every HTTPS connection on the machine to solve a
+                // problem the measurement says does not exist. Deploy exactly what won.
+                s.fallback = fallback_for(&id);
+                (s, hosts)
+            }
+            // "hafif" and anything unrecognised: the narrow, provably safe scope. No catch-all layer
+            // at all — outside its hostlist, Hafif touches nothing on the machine.
+            _ => {
+                let mut s = engine::strategy_by_id(HAFIF_STRATEGY);
+                s.hostlist_only = true;
+                s.fallback = "";
+                (s, CORE_HOSTLIST.iter().map(|s| s.to_string()).collect())
+            }
+        }
+    }
+
+    /// Which aggressive chain Güçlü deploys.
+    ///
+    /// Until this line has actually been measured, the answer is a HARMLESS chain — never a
+    /// route-dependent one. That single rule is what makes "Güçlü breaks a working site"
+    /// unreachable: an unmeasured aggressive chain is never deployed in the first place.
+    fn tuned_strategy_id() -> String {
+        match crate::tuner::load() {
+            Some(t) if crate::tuner::is_current(&t) && !t.strategy.is_empty() => t.strategy,
+            _ => engine::SAFE_FALLBACK.to_string(),
+        }
+    }
+
+    /// Is per-app packet EXCLUSION worth what it costs?
+    ///
+    /// Its cost is not theoretical: applying an exclusion set rebuilds the WinDivert capture filter,
+    /// which restarts winws and drops every live connection. The user's log shows that happening on
+    /// a 60-second cadence for as long as the app was open, and a verification landing 1.1s after
+    /// one of those restarts reported 3/9 targets open where the measurement had found 8/9.
+    ///
+    /// Its benefit was keeping an aggressive desync chain away from apps the user marked "off". But
+    /// under the layered design nothing aggressive runs catch-all any more: outside the hostlist the
+    /// only thing applied is a chain that provably cannot corrupt a connection
+    /// (`Strategy::is_harmless`). So for both shipped modes this mechanism now pays a guaranteed
+    /// cost — engine restarts — to prevent a harm that can no longer occur.
+    ///
+    /// It stays available for the one case where it still earns its keep: a custom profile that
+    /// deliberately runs a non-harmless chain catch-all.
+    fn exclusion_matters(&self) -> bool {
+        let s = self.current_strategy();
+        let catch_all = if s.hostlist_only {
+            if s.fallback.is_empty() {
+                return false; // nothing runs catch-all at all (this is Hafif)
+            }
+            engine::strategy_by_id(s.fallback)
+        } else {
+            s
+        };
+        !catch_all.is_harmless()
+    }
+
+    /// The sites this mode is trying to open — what the probe judges, and what the UI lists.
+    fn probe_targets(&self) -> Vec<String> {
+        match self.mode.as_str() {
+            "guclu" => {
+                let mut t: Vec<String> = TUNE_TARGETS.iter().map(|s| s.to_string()).collect();
+                // A domain the user added by hand is, by definition, one they care about — probe it.
+                for d in self.extra_domains.iter().take(5) {
+                    if !t.iter().any(|h| h == d) {
+                        t.push(d.clone());
+                    }
+                }
+                t
+            }
+            _ => crate::verify::PROBE_TARGETS.iter().map(|s| s.to_string()).collect(),
         }
     }
 
@@ -135,6 +369,15 @@ impl Engine {
         if let Some(r) = self.repeats_override {
             s.repeats = r;
         }
+        // The catch-all fallback layer is part of the RUNTIME plan, not of the strategy's catalog
+        // entry, so it has to be re-applied here.
+        //
+        // Without this the watchdog silently changed the configuration: it respawns a dead engine
+        // from `current_strategy()`, which reads the catalog — and a catalog entry like `safe-split`
+        // carries `fallback: ""`. So a Güçlü session whose measured winner happened to be a
+        // harmless chain would come back from a respawn with NO catch-all layer, i.e. quietly
+        // narrower than the mode the user selected, with nothing reporting the change.
+        s.fallback = self.fallback;
         s
     }
 
@@ -180,14 +423,55 @@ impl Engine {
     }
 
     fn status(&self) -> EngineStatus {
+        let (targets_ok, targets_total, harm, sites) = match &self.probe {
+            Some(p) => {
+                let (ok, total) = p.target_score();
+                let mut sites: Vec<ipc::SiteStatus> = p
+                    .targets
+                    .iter()
+                    .map(|r| ipc::SiteStatus {
+                        host: r.host.clone(),
+                        ok: r.ok,
+                        ms: r.ms,
+                        control: false,
+                        reason: r.reason.clone(),
+                    })
+                    .collect();
+                sites.extend(p.control.iter().map(|r| ipc::SiteStatus {
+                    host: r.host.clone(),
+                    ok: r.ok,
+                    ms: r.ms,
+                    control: true,
+                    reason: r.reason.clone(),
+                }));
+                (ok as u32, total as u32, p.harm, sites)
+            }
+            None => (0, 0, false, Vec::new()),
+        };
         EngineStatus {
-            running: self.running,
+            // MEASURED, not remembered (rule 10): when a DPI child is supposed to exist, ask
+            // whether it actually does rather than trusting a bool set minutes ago. `running` used
+            // to be a plain field, so a winws that died kept the UI showing "on" until a watchdog
+            // tick noticed. `dpi_expected` is false for DNS-only protection, where there is
+            // legitimately no child process to find.
+            running: self.running
+                && (!self.dpi_expected || self.dpi.is_running() || self.warp.is_running()),
             strategy: self.strategy.clone(),
             dns: self.dns.clone(),
             engine: self.engine_id.clone(),
             state: self.state.as_str().to_string(),
             verify: self.verify.as_str().to_string(),
             verify_reason: self.verify.reason(),
+            mode: self.mode.clone(),
+            harm,
+            tuning: self.tuning.clone(),
+            tuning_step: self.tuning_step,
+            tuning_total: self.tuning_total,
+            tuned_strategy: Self::tuned_strategy_id(),
+            targets_ok,
+            targets_total,
+            sites,
+            problems: crate::elog::problems(8),
         }
     }
 
@@ -240,100 +524,463 @@ fn spawn_verify(engine: &Arc<Mutex<Engine>>, e: &mut Engine) {
     /// then it opens") — the user was watching the engine warm up, and the probe sampled the worst
     /// moment and never looked again.
     const VERIFY_ATTEMPTS: usize = 3;
-    /// Gap between retries. Long enough for the driver to attach, short enough that a genuinely
-    /// blocked line still reaches Broken quickly rather than sitting on "checking" for a minute.
-    const VERIFY_RETRY_GAP: Duration = Duration::from_secs(3);
+    /// Gap between retries.
+    ///
+    /// Was 3s. Combined with a 4s probe budget that made the worst case 19 SECONDS before the user
+    /// saw any verdict at all (measured in their log: start 17:47:51, first conclusion 17:48:10).
+    /// The retry exists to cover the moment where winws has spawned but WinDivert has not attached
+    /// yet — that window is well under a second, so 1s is ample and 3s was just waiting.
+    const VERIFY_RETRY_GAP: Duration = Duration::from_secs(1);
 
     e.verify = VerifyState::Verifying;
     e.verify_gen += 1;
     let my_gen = e.verify_gen;
+    let targets = e.probe_targets();
     let engine = Arc::clone(engine);
     std::thread::spawn(move || {
-        let mut outcome = crate::verify::probe_discord();
+        // Still stale-checked between attempts: a probe from a session the user already stopped or
+        // switched away from must never write its result over a newer one.
+        let fresh = |gen: u64| -> bool {
+            let e = engine.lock().unwrap_or_else(|p| p.into_inner());
+            e.verify_gen == gen
+        };
+
+        // Attempt 1 uses the FAST budget so a healthy line produces a verdict in ~1.5s instead of
+        // ~4s, and publish its per-site results straight away: the user should be able to see which
+        // sites opened while the engine is still deciding, not stare at a spinner. Only the FINAL
+        // attempt uses the conclusive budget, so "broken" is never declared on an impatient timeout.
+        let mut report = crate::verify::probe_protection_within(&targets, crate::verify::IO_TIMEOUT_FAST);
         let mut attempt = 1;
-        while !outcome.ok && attempt < VERIFY_ATTEMPTS {
-            // Bail out the moment this probe is stale (stopped / restarted / mode switched), both
-            // before sleeping and after — otherwise a retry could overwrite a NEWER probe's result.
-            {
-                let e = engine.lock().unwrap_or_else(|p| p.into_inner());
-                if e.verify_gen != my_gen {
-                    return;
-                }
+        {
+            let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+            if e.verify_gen != my_gen {
+                return;
             }
-            std::thread::sleep(VERIFY_RETRY_GAP);
-            {
-                let e = engine.lock().unwrap_or_else(|p| p.into_inner());
-                if e.verify_gen != my_gen {
-                    return;
-                }
+            if report.ok && !report.harm {
+                // Fast success: nothing to retry, the UI can say "protected" now.
+                e.probe = Some(report.clone());
+                e.verify = VerifyState::Verified;
+            } else {
+                // Not conclusive yet — show the partial picture but keep the state honest.
+                e.probe = Some(report.clone());
             }
-            attempt += 1;
-            outcome = crate::verify::probe_discord();
         }
 
-        let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
-        if e.verify_gen != my_gen {
-            return; // stale — stopped/restarted since this probe was launched, discard the result
-        }
-        e.verify = if outcome.ok {
-            VerifyState::Verified
-        } else {
-            VerifyState::Broken(outcome.reason)
-        };
-        audit(&format!(
-            "verify ({attempt}/{VERIFY_ATTEMPTS} deneme): {}",
-            match &e.verify {
-                VerifyState::Verified => "verified (real TLS handshake to Discord succeeded)".to_string(),
-                VerifyState::Broken(r) => format!("broken: {r}"),
-                VerifyState::Unverified | VerifyState::Verifying => unreachable!(),
+        // HARM short-circuits the retry loop. Retrying is for a bypass that has not warmed up yet;
+        // damage does not warm up, and every extra second spent retrying is a second the user's
+        // internet stays broken.
+        while !report.ok && !report.harm && attempt < VERIFY_ATTEMPTS {
+            if !fresh(my_gen) {
+                return;
             }
-        ));
+            std::thread::sleep(VERIFY_RETRY_GAP);
+            if !fresh(my_gen) {
+                return;
+            }
+            attempt += 1;
+            let budget = if attempt >= VERIFY_ATTEMPTS {
+                crate::verify::IO_TIMEOUT // last word: give a slow line every chance
+            } else {
+                crate::verify::IO_TIMEOUT_FAST
+            };
+            report = crate::verify::probe_protection_within(&targets, budget);
+        }
+
+        let (ok, harm, reason) = (report.ok, report.harm, report.reason.clone());
+        let (ok_n, total_n) = report.target_score();
+
+        {
+            let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+            if e.verify_gen != my_gen {
+                return; // stale — discard
+            }
+            e.probe = Some(report);
+            e.verify = if ok && !harm {
+                VerifyState::Verified
+            } else {
+                VerifyState::Broken(reason.clone())
+            };
+            audit(&format!(
+                "verify ({attempt}/{VERIFY_ATTEMPTS}): {ok_n}/{total_n} targets open, harm={harm}"
+            ));
+        }
+
+        if harm {
+            // ---- DO NO HARM, but CONFIRM first ---------------------------------------------
+            //
+            // Control sites failing means the deployed chain may be corrupting ordinary traffic,
+            // and the reaction (throw the tuning away, redeploy, restart) is expensive and visible.
+            // So it must not fire on a blip.
+            //
+            // It nearly did: on a slow line the user's measurement recorded `safe-fake: broke 3
+            // control` — all three, at once — while neighbouring candidates on the same line showed
+            // handshakes taking 1.3-2.5s. That is a congested line briefly exceeding the fast probe
+            // budget, not a chain that cannot corrupt anything suddenly corrupting everything.
+            //
+            // Re-probe the control set alone, with the CONCLUSIVE budget. Cheap (3 hosts, parallel)
+            // and it separates "the engine is breaking things" from "the line hiccuped".
+            std::thread::sleep(Duration::from_millis(800));
+            if !fresh(my_gen) {
+                return;
+            }
+            let control: Vec<String> = crate::verify::CONTROL_TARGETS.iter().map(|s| s.to_string()).collect();
+            let recheck = crate::verify::probe_hosts_within(&control, crate::verify::IO_TIMEOUT);
+            let still_failing = recheck.iter().filter(|r| !r.ok).count();
+            if still_failing * 2 <= recheck.len() {
+                crate::elog::warn(
+                    "verify",
+                    "harm_not_confirmed",
+                    &format!(
+                        "control sites failed once ({reason}) but recovered on recheck — treating it \
+                         as a transient network problem, not engine damage"
+                    ),
+                );
+                let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+                if e.verify_gen == my_gen {
+                    // Not harm; the honest state is "applied, not verified" rather than "broken".
+                    e.verify = VerifyState::Unverified;
+                }
+                drop(e);
+                maybe_auto_tune(&engine);
+                return;
+            }
+
+            crate::elog::error(
+                "verify",
+                "harm_detected",
+                &format!(
+                    "{reason} — confirmed on recheck ({still_failing}/{} control sites still failing) \
+                     — reverting to a chain that cannot corrupt traffic",
+                    recheck.len()
+                ),
+            );
+            revert_to_harmless(&engine);
+            return;
+        }
+
+        if !ok {
+            // Targets did not open, but nothing broke. That is the case measurement exists for:
+            // this line needs a different chain than the one currently deployed.
+            maybe_auto_tune(&engine);
+        }
     });
 }
 
-/// Boot'ta otomatik açılan korumanın varsayılan hostlist'i (state.svelte.ts CORE_SITES + YouTube).
-const DEFAULT_HOSTLIST: &[&str] = &[
-    "discord.com", "discordapp.com", "discord.gg", "discordapp.net", "discord.media",
-    "gateway.discord.gg", "cdn.discordapp.com", "roblox.com", "www.roblox.com", "rbxcdn.com",
-    "youtube.com", "googlevideo.com",
-];
+/// The line changed under a tuned aggressive chain (or the tuning was wrong): throw the tuning
+/// away, fall back to a provably harmless configuration, and restart.
+///
+/// Discarding the tuning file matters — otherwise the next Start would redeploy exactly the chain
+/// that just broke the user's internet.
+fn revert_to_harmless(engine: &Arc<Mutex<Engine>>) {
+    /// Reverting is only a fix when the deployed chain was the cause. If harm persists AFTER we
+    /// fell back to a chain that provably cannot corrupt traffic, the cause is elsewhere (the line
+    /// itself is down, the control endpoints are unreachable) — and reverting again would redeploy
+    /// the identical configuration, re-probe, see harm again, and restart the engine every few
+    /// seconds forever. That churn kills every live connection on the machine, which is worse than
+    /// the condition it is trying to fix.
+    const MAX_REVERTS: u8 = 2;
+
+    let _ = std::fs::remove_file(crate::tuner::path());
+    let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+    if !e.running {
+        return;
+    }
+    e.harm_reverts = e.harm_reverts.saturating_add(1);
+    if e.harm_reverts > MAX_REVERTS {
+        e.dpi.stop();
+        e.running = false;
+        e.dpi_expected = false;
+        e.state = RunState::Error;
+        e.tuning = "gave_up".into();
+        crate::elog::error(
+            "verify",
+            "harm_persists",
+            "ordinary sites are still failing with a harmless configuration deployed — this is not \
+             something the engine is causing. Protection stopped so it cannot be blamed for, or \
+             add to, whatever is actually wrong with the connection.",
+        );
+        save_state(&e);
+        return;
+    }
+    e.tuning = "gave_up".into();
+    match load_mode(&mut e) {
+        Ok(()) => {
+            e.state = RunState::Active;
+            audit("harm detected — reloaded with the harmless configuration");
+            spawn_verify(engine, &mut e);
+        }
+        Err(m) => {
+            // Could not even bring the safe configuration up: stop entirely rather than leave the
+            // damaging one running. Off is a working internet; this is not a close call.
+            e.dpi.stop();
+            e.running = false;
+            e.dpi_expected = false;
+            e.state = RunState::Error;
+            crate::elog::error("verify", "harm_revert_failed", &format!("stopped protection: {m}"));
+        }
+    }
+}
+
+/// Targets are blocked and nothing is broken → measure this line and deploy what wins.
+///
+/// Rate-limited hard (10 minutes): a genuinely unbeatable line must not turn into a loop that
+/// restarts the engine every few seconds and kills every connection on the machine. That churn is
+/// the "works, then stops, then works" pattern this codebase has already been bitten by once.
+fn maybe_auto_tune(engine: &Arc<Mutex<Engine>>) {
+    const AUTO_TUNE_MIN_GAP: Duration = Duration::from_secs(600);
+
+    let should = {
+        let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+        let fresh_enough = e.last_auto_tune.map(|t| t.elapsed() >= AUTO_TUNE_MIN_GAP).unwrap_or(true);
+        // Only Güçlü auto-tunes. Hafif's promise is "narrow and safe"; silently escalating it to a
+        // measured aggressive chain would be the app deciding to widen its own blast radius.
+        let eligible = e.running && e.mode == "guclu" && e.tuning != "tuning" && fresh_enough;
+        if eligible {
+            e.last_auto_tune = Some(Instant::now());
+            e.tuning = "tuning".into();
+        }
+        eligible
+    };
+    if !should {
+        return;
+    }
+
+    crate::elog::info("tuner", "auto", "targets are blocked — measuring this line automatically");
+    let engine = Arc::clone(engine);
+    std::thread::spawn(move || {
+        run_tuning(&engine, Vec::new(), |_| {});
+    });
+}
+
 
 // ============================================================================================
-// Protection-mode tuning.
+// Protection modes.
 //
-// ⚠ THESE TWO REPEAT VALUES ARE PROVISIONAL — NOT MEASURED. Do not treat them as tuned.
-// The ONLY dpi-desync-repeats value ever actually measured is 1, and that sweep
-// (docs/LIVE-VERIFICATION.md, 2026-08-13 (c)) ran against www.google.com / www.microsoft.com /
-// www.cloudflare.com — NEVER against Discord, and never against the catch-all path. 6 and 8 are
-// picked as conservative middle ground between that single data point and the engine's own
-// long-standing c1 default of 11. Anyone tuning these later: re-run the sweep against the real
-// target set first, per mode, and record it in LIVE-VERIFICATION.md before changing them here.
+// REWRITTEN 2026-08-16 after a reported failure that inverted the two modes: on "Güçlü Koruma" an
+// ordinary HTTPS site would not open at all, and switching DOWN to "Hafif" opened it instantly.
+//
+// The cause was structural, not a bad constant. Güçlü ran one route-dependent forgery
+// (`turkcell-hotspot`: fake + ttl=1 + autottl=3, no fooling) CATCH-ALL over every TLS/443 flow on
+// the machine. That chain only works where the DPI sits at the assumed hop distance; everywhere
+// else the forged ClientHello outlives the DPI, reaches the real server, and the server drops the
+// connection. Hafif "worked" purely because its hostlist did not contain that site, so nothing
+// touched it. Strength was buying damage, not coverage.
+//
+// Both modes are now LAYERED and neither is ever catch-all-aggressive:
+//
+//   layer 1  aggressive chain, gated to a hostlist of domains known to need it
+//   layer 2  a chain that provably cannot corrupt a connection (Strategy::is_harmless), catch-all
+//
+// and layer 1's chain is chosen by measurement on the actual line (`tuner`), not hardcoded.
 // ============================================================================================
 
-/// "Hafif Koruma" — Discord + Roblox only, hostlist-gated. DEFAULT MODE on first run.
-const HAFIF_REPEATS: u32 = 6;
-
-/// "Güçlü Koruma" — catch-all (no --hostlist, every TLS/443 flow desynced), using the desync chain
-/// that was MEASURED to open the hardest domains on a real blocked line (2026-08-15).
+/// Which catch-all layer (if any) ships alongside a winning chain.
 ///
-/// A 14-config sweep found this to be the only preset that got the hard domains through: TTL-based
-/// desync (fake + ttl 1 + autottl 3). Every c1 repeat count (8/11/20) left them at 0% while keeping
-/// the control target at 100%, which is what ruled out repeat-count tuning as the answer. Verified
-/// afterwards at 400/400 under 50s of sustained load, no engine restarts.
-///
-/// The preset id names an ISP only because that is where it was originally derived; here it is
-/// simply "the chain that measurably works". Evidence is from ONE line — picking this per-line is
-/// what Autopilot is meant to automate.
-const GUCLU_STRATEGY: &str = "turkcell-hotspot";
+/// Single source of truth for the "deploy exactly what was measured" rule, so the deployment side
+/// and the test that guards it cannot drift apart. `tuner::candidate_strategy` applies the same
+/// rule when it MEASURES a candidate.
+fn fallback_for(strategy_id: &str) -> &'static str {
+    if strategy_id == "off" {
+        ""
+    } else {
+        engine::SAFE_FALLBACK
+    }
+}
 
-/// Hafif Koruma's hostlist: Discord + Roblox only, per the shipped scope. Kept deliberately small —
-/// each entry is a per-connection lookup in winws, and a broad list goes stale. Users needing wider
-/// coverage switch to Güçlü Koruma (catch-all) rather than growing this.
-const HAFIF_HOSTLIST: &[&str] = &[
+/// Hafif Koruma — the narrow, guaranteed-safe scope: Discord + Roblox, and nothing else on the
+/// machine is touched at all (no catch-all layer). DEFAULT MODE on first run.
+const CORE_HOSTLIST: &[&str] = &[
     "discord.com", "discordapp.com", "discord.gg", "discordapp.net", "discord.media",
     "gateway.discord.gg", "cdn.discordapp.com",
     "roblox.com", "www.roblox.com", "rbxcdn.com",
 ];
+
+/// Güçlü Koruma — the wide scope: everything Hafif covers, plus the domains that are actually
+/// blocked on Turkish consumer lines and that users install this app to reach. These get the
+/// measured aggressive chain; every OTHER site on the machine gets the harmless catch-all layer,
+/// which is what makes "wide" safe to enable.
+const WIDE_HOSTLIST: &[&str] = &[
+    // Discord + Roblox (same as CORE)
+    "discord.com", "discordapp.com", "discord.gg", "discordapp.net", "discord.media",
+    "gateway.discord.gg", "cdn.discordapp.com",
+    "roblox.com", "www.roblox.com", "rbxcdn.com",
+    // Video / streaming that gets throttled or SNI-filtered
+    "youtube.com", "www.youtube.com", "googlevideo.com", "ytimg.com",
+    // Commonly DNS-sinkholed or SNI-blocked on TR lines
+    "pornhub.com", "www.pornhub.com", "phncdn.com",
+    "brazzers.com", "xvideos.com", "xhamster.com", "redtube.com", "youporn.com",
+    "onlyfans.com",
+];
+
+/// Default targets a tuning run is judged against: a spread across the blocked set, not one family.
+/// Discord alone was the old probe set, and that is exactly how Güçlü could report "verified" while
+/// every non-Discord site was dead.
+const TUNE_TARGETS: &[&str] =
+    &["discord.com", "cdn.discordapp.com", "www.roblox.com", "www.pornhub.com", "www.youtube.com"];
+
+/// The chain Hafif uses inside its hostlist. Harmless by construction; Hafif's promise is "never
+/// makes anything worse", so it does not get the aggressive/measured treatment.
+const HAFIF_STRATEGY: &str = "safe-fake";
+
+/// Delete every file this app keeps on disk, and REPORT what is actually gone.
+///
+/// Returns both lists on purpose. "Deleted" with no verification is the same class of claim as
+/// "protected" with no probe — the rest of this codebase refuses to make it, and a privacy control
+/// is the last place to start.
+fn wipe_local_data() -> serde_json::Value {
+    let data = ipc::data_dir();
+    let logs = crate::sys::log_dir();
+    let mut targets: Vec<std::path::PathBuf> = vec![
+        state_path(),
+        legacy_state_path(),
+        crate::tuner::path(),
+        data.join("hostlist.txt"),
+        data.join("winws_master.filter"),
+        data.join("gd-blacklist.txt"),
+    ];
+    // Every log file, plus any staged bundle.
+    if let Ok(rd) = std::fs::read_dir(&logs) {
+        for entry in rd.filter_map(|e| e.ok()) {
+            targets.push(entry.path());
+        }
+    }
+
+    let mut removed: Vec<String> = Vec::new();
+    let mut remaining: Vec<String> = Vec::new();
+    for t in targets {
+        if !t.exists() {
+            continue;
+        }
+        let name = t.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let res = if t.is_dir() { std::fs::remove_dir_all(&t) } else { std::fs::remove_file(&t) };
+        // Check the FILESYSTEM, not the return value: a delete can report success on a path that a
+        // running handle keeps alive until close.
+        if res.is_ok() && !t.exists() {
+            removed.push(name);
+        } else {
+            remaining.push(name);
+        }
+    }
+    serde_json::json!({ "removed": removed, "remaining": remaining })
+}
+
+/// Bring the DPI engine in line with the active mode. Caller holds the lock.
+///
+/// The one place a mode turns into a running process. Every earlier caller open-coded four field
+/// assignments plus a start, which is how Güçlü ended up deploying a catch-all forgery: one of
+/// those four assignments (`hostlist_only = false`) meant something very different from what the
+/// mode's description claimed.
+fn load_mode(e: &mut Engine) -> Result<(), String> {
+    let mode = e.mode.clone();
+    let (strat, hosts) = e.plan_for_mode(&mode);
+    e.strategy = strat.id.to_string();
+    e.hostlist = hosts.clone();
+    e.hostlist_only = true;
+    e.fallback = strat.fallback; // so a watchdog respawn rebuilds the SAME layered plan
+    e.repeats_override = None; // modes carry no sweep override; a stale one must not leak in
+
+    let needs_child = engine::has_web_stage(&strat, &hosts);
+    // ALWAYS stop first. `start()` is idempotent by contract, so against a live child it returns
+    // Ok without applying the new argv — which is exactly how a hostlist/strategy change could be
+    // accepted, reported as applied, and silently never take effect.
+    e.dpi.stop();
+    e.dpi_expected = needs_child;
+    if !needs_child {
+        crate::elog::info(
+            "service",
+            "dns_only",
+            "measurement says this line needs no packet-level work — running DNS-only and touching \
+             no traffic",
+        );
+        return Ok(());
+    }
+    e.dpi.start(&strat, &hosts)
+}
+
+/// Measure the ladder on this line, persist the winner, and redeploy the mode with it.
+///
+/// Runs on a TEMPORARY engine instance with the main one stopped, and — critically — WITHOUT
+/// holding the engine mutex. Tuning takes tens of seconds; holding the lock across it would block
+/// every `dispatch()` and reproduce the "service did not answer in 45s" freeze this codebase has
+/// already been bitten by twice (warp install, watchdog re-entry).
+fn run_tuning<F: FnMut(&crate::tuner::Row)>(
+    engine: &Arc<Mutex<Engine>>,
+    targets: Vec<String>,
+    on_row: F,
+) -> crate::tuner::Tuning {
+    let (was_running, targets) = {
+        let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+        let wr = e.running;
+        let t = if targets.is_empty() { e.probe_targets() } else { targets };
+        e.tuning = "tuning".into();
+        e.state = RunState::Paused; // watchdog leaves a Paused engine alone
+        e.dpi.stop();
+        e.running = false;
+        e.dpi_expected = false;
+        (wr, t)
+    };
+
+    // Separate engine instance: two winws processes would fight over the single global WinDivert
+    // driver, so the main one is stopped above and this one owns the driver for the run.
+    // Publish progress as each candidate finishes. Without this the UI has a 15-20 second window
+    // where nothing changes on screen, which reads as a hang — and the whole point of measuring
+    // faster is wasted if the user cannot tell that anything is happening.
+    let total = engine::tuner_ladder_first_pass().len() as u32;
+    {
+        let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+        e.tuning_step = 0;
+        e.tuning_total = total;
+    }
+    let progress_engine = Arc::clone(engine);
+    let mut step: u32 = 0;
+    let mut on_row = on_row;
+    let mut temp = engine::make_engine("zapret");
+    let result = crate::tuner::run_two_pass(temp.as_mut(), &targets, |row| {
+        step += 1;
+        let mut e = progress_engine.lock().unwrap_or_else(|p| p.into_inner());
+        e.tuning_step = step;
+        // The second pass extends past the first pass's length; report the real total rather than
+        // letting the counter run past it.
+        if step > e.tuning_total {
+            e.tuning_total = step;
+        }
+        drop(e);
+        on_row(row);
+    });
+    temp.stop();
+    drop(temp);
+
+    if let Err(m) = crate::tuner::save(&result) {
+        // Not fatal — the winner still gets deployed for this session; it just will not survive a
+        // restart. Saying so beats a silent re-measure on every boot.
+        crate::elog::warn("tuner", "save_failed", &format!("tuning result not persisted: {m}"));
+    }
+
+    let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+    e.tuning = if result.gave_up { "gave_up".into() } else { "tuned".into() };
+    e.tuning_step = 0;
+    e.tuning_total = 0;
+    if was_running {
+        match load_mode(&mut e) {
+            Ok(()) => {
+                e.running = true;
+                e.state = RunState::Active;
+                spawn_verify(engine, &mut e);
+            }
+            Err(m) => {
+                e.running = false;
+                e.dpi_expected = false;
+                e.state = RunState::Error;
+                e.reset_verify();
+                crate::elog::error("tuner", "redeploy_failed", &m);
+            }
+        }
+    } else {
+        e.state = RunState::Idle;
+    }
+    save_state(&e);
+    result
+}
 
 fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
     if let Err(m) = ipc::validate(&cmd) {
@@ -341,12 +988,27 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
         return Response::Error { message: m };
     }
     let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+
+    // A line measurement owns the WinDivert driver for its duration (it drives a temporary engine,
+    // one candidate at a time). Anything that would start a SECOND winws while it runs makes the two
+    // fight over the single global driver — the loser exits immediately, and whichever candidate was
+    // being measured at that moment gets scored against a dead engine.
+    //
+    // Seen in the user's log: a `Command::Start` arrived mid-run, and the two candidates either side
+    // of it recorded impossibly fast probes (256-278ms against a 4s norm) with results that did not
+    // match their neighbours. Those rows were measuring nothing. Refusing the command outright is
+    // better than silently corrupting a measurement the user is waiting on.
+    if matches!(cmd, Command::Start | Command::SetProtectionMode { .. } | Command::ApplyProfile { .. })
+        && e.tuning == "tuning"
+    {
+        return Response::Error {
+            message: "a connection measurement is running — try again when it finishes".into(),
+        };
+    }
+
     match cmd {
         Command::Start => {
             e.state = RunState::Applying;
-            if e.strategy.is_empty() {
-                e.strategy = "auto".into();
-            }
 
             // Secure DNS is applied HERE, not merely recorded.
             //
@@ -354,49 +1016,100 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
             // never applied — so `status` reported dns=cloudflare while the adapters still used the
             // ISP resolver. On the measured line that resolver answers every Discord domain with
             // 195.175.254.2 (a sinkhole), and DPI desync CANNOT fix a wrong destination IP: the
-            // connection times out at TCP, before any handshake exists to rewrite. Every strategy
-            // and repeat value failed identically because of it.
+            // connection times out at TCP, before any handshake exists to rewrite.
             //
-            // Applied with the engine lock RELEASED (run_dns shells out to PowerShell across every
-            // adapter) — holding it here would reintroduce the freeze fixed in warp.rs.
+            // SPEED (2026-08-16): DNS and the engine now come up CONCURRENTLY. They are independent
+            // — one rewrites resolver settings, the other attaches a packet filter — but were run
+            // strictly one after the other, so every Start paid DNS latency plus engine latency in
+            // series. The lock is released for both: `run_dns` shells out across every adapter, and
+            // holding the mutex across that is the freeze already fixed once in warp.rs.
             let dns_profile = if e.dns.is_empty() { "cloudflare".to_string() } else { e.dns.clone() };
             drop(e);
-            let dns_applied = crate::dns::run_dns(&dns_profile);
+
+            let dns_handle = {
+                let p = dns_profile.clone();
+                std::thread::spawn(move || crate::dns::run_dns(&p))
+            };
+
+            let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
+            let engine_result = load_mode(&mut e);
+            drop(e);
+
+            // Join DNS before verifying: the probe resolves names, so a probe that races the DNS
+            // switch would be measuring the old resolver and reporting nonsense.
+            let dns_applied = dns_handle.join().unwrap_or_else(|_| Err("DNS thread panicked".into()));
+
             let mut e = engine.lock().unwrap_or_else(|p| p.into_inner());
             match &dns_applied {
                 Ok(()) => {
                     e.dns = dns_profile;
-                    audit("start: secure DNS uygulandı");
+                    audit("start: secure DNS applied");
                 }
                 Err(m) => {
-                    // Do NOT claim a provider we failed to set. Protection still starts (desync helps
-                    // domains that aren't DNS-poisoned), but the status must not overstate it.
+                    // Do NOT claim a provider we failed to set. Protection still starts (desync
+                    // helps domains that aren't DNS-poisoned), but status must not overstate it.
                     e.dns = "auto".into();
-                    audit(&format!("start: DNS uygulanamadı, sistem DNS'i kullanılıyor: {m}"));
+                    crate::elog::warn(
+                        "dns",
+                        "apply_failed",
+                        &format!("secure DNS could not be applied, using the system resolver: {m}"),
+                    );
                 }
             }
-            if e.hostlist.is_empty() {
-                // Used to be seeded by the removed boot-auto-protect block (P0-e fix, 2026-08-14) --
-                // an explicit Start is now the only path in, so it has to seed this itself, same
-                // fallback shape as strategy/dns just above.
-                e.hostlist = DEFAULT_HOSTLIST.iter().map(|s| s.to_string()).collect();
-            }
-            let strat = e.current_strategy();
-            let hostlist = e.hostlist.clone();
-            match e.dpi.start(&strat, &hostlist) {
+
+            match engine_result {
                 Ok(()) => {
                     e.running = true;
                     e.state = RunState::Active;
                     let ll = e.limit_list();
                     e.dpi.set_limits(&ll);
                     e.sync_warp();
-                    audit(&format!("start engine={} strategy={}", e.engine_id, strat.id));
+                    crate::elog::info(
+                        "service",
+                        "start",
+                        &format!(
+                            "protection on — mode={} strategy={} scope={} domains",
+                            e.mode,
+                            e.strategy,
+                            e.hostlist.len()
+                        ),
+                    );
                     spawn_verify(engine, &mut e);
+                    save_state(&e);
+
+                    // MEASURE NOW, don't wait for failure.
+                    //
+                    // The old sequence was: start → let verification fail (three probes, ~9s) →
+                    // only then begin measuring. Those 9 seconds bought nothing: with no usable
+                    // stored measurement we already know we are running a placeholder chain, so
+                    // waiting to be told is pure latency in front of the user's first impression.
+                    //
+                    // Only when there is nothing current to deploy. With a stored, in-date
+                    // measurement for this network we skip straight to it and never measure at all
+                    // — which is what makes every start after the first one take seconds.
+                    let needs_measurement = e.mode == "guclu"
+                        && !crate::tuner::load().map(|t| crate::tuner::is_current(&t)).unwrap_or(false);
+                    if needs_measurement {
+                        e.tuning = "tuning".into();
+                        let engine2 = Arc::clone(engine);
+                        std::thread::spawn(move || {
+                            crate::elog::info(
+                                "tuner",
+                                "on_start",
+                                "no current measurement for this network — measuring immediately \
+                                 instead of waiting for verification to fail",
+                            );
+                            run_tuning(&engine2, Vec::new(), |_| {});
+                        });
+                    }
                     Response::Status(e.status())
                 }
                 Err(m) => {
+                    e.running = false;
+                    e.dpi_expected = false;
                     e.state = RunState::Error;
                     e.reset_verify();
+                    crate::elog::error("service", "start_failed", &m);
                     Response::Error { message: m }
                 }
             }
@@ -405,9 +1118,13 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
             e.warp.stop();
             e.dpi.stop();
             e.running = false;
+            e.dpi_expected = false;
             e.state = RunState::Idle;
+            e.probe = None;
+            e.harm_reverts = 0; // an explicit Stop/Start is a fresh session, not a continued loop
             e.reset_verify();
-            audit("stop");
+            crate::elog::info("service", "stop", "protection off (user request)");
+            save_state(&e);
             Response::Status(e.status())
         }
         Command::Status => Response::Status(e.status()),
@@ -554,14 +1271,20 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
             Response::Ok
         }
         Command::SetHostlist { domains } => {
-            audit(&format!("set_hostlist ({} domain)", domains.len()));
-            let was_running = e.running;
-            e.hostlist = domains;
-            if was_running {
-                let strat = e.current_strategy();
-                let hl = e.hostlist.clone();
-                match e.dpi.start(&strat, &hl) {
-                    Ok(()) => Response::Status(e.status()),
+            // SUPERSEDED by SetExtraDomains. Kept so an older UI build still does something sane
+            // instead of erroring, and routed through the same path so it can no longer hit the
+            // old bug: this used to call `dpi.start()` against a LIVE child, which is idempotent by
+            // contract — so the new list was accepted, reported as applied, and never took effect.
+            audit(&format!("set_hostlist ({} domains) → treated as extra domains", domains.len()));
+            e.extra_domains = domains;
+            let running = e.running && e.mode == "guclu";
+            save_state(&e);
+            if running {
+                match load_mode(&mut e) {
+                    Ok(()) => {
+                        spawn_verify(engine, &mut e);
+                        Response::Status(e.status())
+                    }
                     Err(m) => Response::Error { message: m },
                 }
             } else {
@@ -569,78 +1292,110 @@ fn dispatch(engine: &Arc<Mutex<Engine>>, cmd: Command) -> Response {
             }
         }
         Command::SetProtectionMode { mode } => {
-            audit(&format!("set_protection_mode {mode}"));
-            // Snapshot everything this command touches, so a failed apply can roll the Engine back
-            // to exactly what it was rather than leaving a half-applied mode reported as active.
-            let prev = (e.strategy.clone(), e.repeats_override, e.hostlist_only, e.hostlist.clone());
-
-            match mode.as_str() {
-                "hafif" => {
-                    e.strategy = "c1".into();
-                    e.repeats_override = Some(HAFIF_REPEATS);
-                    e.hostlist_only = true;
-                    e.hostlist = HAFIF_HOSTLIST.iter().map(|s| s.to_string()).collect();
-                }
-                "guclu" => {
-                    // MEASURED, not guessed (2026-08-15, laptop). A 14-config sweep against the
-                    // domains that were failing 100% of the time found exactly ONE that opened
-                    // them: this preset's TTL-based desync (fake + ttl 1 + autottl 3). Every c1
-                    // variant (repeats 8/11/20), plain `fake`, and `superonline` left the hard
-                    // domains at 0% while keeping the control target at 100% — so the failure was
-                    // the desync method, not the repeat count. `multidisorder`, `tt`, `tt-alt` and
-                    // `kablonet` were worse still: 0% on the control target too.
-                    //
-                    // Verified under load afterwards: 400/400 (100%) across pornhub.com,
-                    // brazzers.com, xvideos.com and discord.com over 50s, no winws restarts.
-                    //
-                    // NOTE the preset id names an ISP because that is where it was first derived;
-                    // it is used here purely as "the desync chain that measurably works", and the
-                    // evidence is from ONE line. Another line may well need a different one — that
-                    // per-line choice is exactly what Autopilot is meant to make automatically.
-                    e.strategy = GUCLU_STRATEGY.into();
-                    // NO repeats override: the configuration that scored 400/400 ran with the
-                    // preset's own value. Forcing a repeat count here would ship something other
-                    // than what was actually measured.
-                    e.repeats_override = None;
-                    // Catch-all: hostlist_only=false means winws gets NO --hostlist flag, so every
-                    // TLS/443 flow is desynced (engine.rs build_args). The hostlist field is left
-                    // populated but unused — it only matters when hostlist_only is true.
-                    e.hostlist_only = false;
-                }
-                _ => return Response::Error { message: format!("geçersiz koruma modu: {mode}") },
+            if !matches!(mode.as_str(), "hafif" | "guclu") {
+                return Response::Error { message: format!("unknown protection mode: {mode}") };
             }
+            audit(&format!("set_protection_mode {mode}"));
+            let prev_mode = e.mode.clone();
+            e.mode = mode.clone();
 
             if !e.running {
                 // Nothing to verify yet — the mode is recorded and takes effect on the next Start.
+                save_state(&e);
                 return Response::Status(e.status());
             }
 
-            // Live switch: restart so winws actually picks up the new args (start() is idempotent
-            // and would no-op against a live child), then re-probe — the previous mode's Verified
-            // result says nothing about this one.
-            e.dpi.stop();
-            let strat = e.current_strategy();
-            let hl = e.hostlist.clone();
-            match e.dpi.start(&strat, &hl) {
+            // Live switch: reload so winws actually picks up the new scope, then re-probe. The
+            // previous mode's Verified result says nothing about this one.
+            match load_mode(&mut e) {
                 Ok(()) => {
                     e.running = true;
                     e.state = RunState::Active;
+                    e.probe = None; // the old per-site list describes the old mode; don't show it
                     spawn_verify(engine, &mut e);
+                    save_state(&e);
                     Response::Status(e.status())
                 }
                 Err(m) => {
-                    // Roll the settings back so status() keeps describing the mode that is actually
-                    // loaded, not the one we failed to switch to.
-                    e.strategy = prev.0;
-                    e.repeats_override = prev.1;
-                    e.hostlist_only = prev.2;
-                    e.hostlist = prev.3;
+                    // Roll back so status() keeps describing what is actually loaded, not what we
+                    // failed to switch to.
+                    e.mode = prev_mode;
+                    let _ = load_mode(&mut e);
                     e.running = false;
+                    e.dpi_expected = false;
                     e.state = RunState::Error;
                     e.reset_verify();
-                    audit(&format!("set_protection_mode BAŞARISIZ, geri alındı: {m}"));
+                    crate::elog::error("service", "mode_switch_failed", &m);
                     Response::Error { message: m }
                 }
+            }
+        }
+        Command::SetAutoStart { enable } => {
+            e.autostart = enable;
+            save_state(&e);
+            crate::elog::info(
+                "service",
+                "autostart",
+                if enable {
+                    "protection will be restored when Windows starts"
+                } else {
+                    "protection will stay off until started by hand"
+                },
+            );
+            Response::Status(e.status())
+        }
+        Command::SetExtraDomains { domains } => {
+            e.extra_domains = domains;
+            let running = e.running;
+            save_state(&e);
+            // Güçlü's hostlist is built from the shipped set plus these, so a change has to be
+            // pushed into the engine. This is the bug the old SetHostlist had: it called start()
+            // on a live child, which is idempotent, so the new list was accepted and never applied.
+            if running && e.mode == "guclu" {
+                match load_mode(&mut e) {
+                    Ok(()) => {
+                        spawn_verify(engine, &mut e);
+                        Response::Status(e.status())
+                    }
+                    Err(m) => Response::Error { message: m },
+                }
+            } else {
+                Response::Status(e.status())
+            }
+        }
+        Command::WipeLocalData => {
+            // Stop first: the engine holds hostlist.txt open and would rewrite it a moment later.
+            // Deleting under a running engine is how a "delete everything" leaves everything.
+            e.dpi.stop();
+            e.running = false;
+            e.dpi_expected = false;
+            e.state = RunState::Idle;
+            e.probe = None;
+            e.extra_domains.clear();
+            e.tuning = String::new();
+            e.reset_verify();
+            drop(e);
+
+            let report = wipe_local_data();
+            crate::elog::info("service", "wiped", "local data deleted at the user's request");
+            match serde_json::to_string(&report) {
+                Ok(j) => Response::Data(j),
+                Err(err) => Response::Error { message: err.to_string() },
+            }
+        }
+        Command::Events { since } => {
+            let (watermark, events) = crate::elog::since(since);
+            match serde_json::to_string(&serde_json::json!({ "watermark": watermark, "events": events })) {
+                Ok(j) => Response::Data(j),
+                Err(err) => Response::Error { message: err.to_string() },
+            }
+        }
+        Command::Tune { targets } => {
+            drop(e); // measurement takes tens of seconds — never under the lock
+            let result = run_tuning(engine, targets, |_| {});
+            match serde_json::to_string(&result) {
+                Ok(j) => Response::Data(j),
+                Err(err) => Response::Error { message: err.to_string() },
             }
         }
         // ---- Profil sistemi (docs/07 §4) ----
@@ -1119,6 +1874,42 @@ fn handle_conn(conn: Stream, engine: Arc<Mutex<Engine>>, token: String) {
     }
 }
 
+/// Block until the machine actually has working connectivity, or `budget` expires.
+///
+/// At boot the service is started by the SCM long before the network stack is usable — adapters
+/// are still initialising, there may be no default route, DHCP may not have answered. Applying DNS
+/// and attaching a packet filter into that window fails in ways indistinguishable from an engine
+/// fault, which is exactly the kind of "it just doesn't work after restart" report that is
+/// impossible to diagnose afterwards.
+///
+/// Returns whether connectivity was observed. A `false` is not a reason to refuse to start: the
+/// user may genuinely be offline, and verification will then report that honestly rather than the
+/// service silently deciding not to protect them.
+fn wait_for_network(budget: Duration) -> bool {
+    use std::net::TcpStream;
+    let deadline = Instant::now() + budget;
+    let mut delay = Duration::from_millis(250);
+    loop {
+        if let Ok(addr) = "1.1.1.1:443".parse() {
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).is_ok() {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            crate::elog::warn(
+                "service",
+                "network_wait_timeout",
+                "no connectivity within the boot wait window — starting anyway and letting \
+                 verification report the real state",
+            );
+            return false;
+        }
+        std::thread::sleep(delay);
+        // Back off to 2s: a machine that is slow to get online should not be polled 240 times.
+        delay = (delay * 2).min(Duration::from_secs(2));
+    }
+}
+
 /// Named-pipe sunucusunu çalıştır (bloklar). Servis ikilisi ve dev'de gömülü sunucu kullanır.
 pub fn serve_blocking() -> io::Result<()> {
     let name = PIPE_NAME.to_ns_name::<GenericNamespaced>().map_err(io::Error::other)?;
@@ -1142,21 +1933,83 @@ pub fn serve_blocking() -> io::Result<()> {
     let listener = opts.create_sync()?;
     let token = ensure_token();
     let engine = Arc::new(Mutex::new(Engine::new()));
+    // Enforce the retention limit at startup — actually DELETE what aged out, do not merely stop
+    // trusting it. A limit that leaves the data on disk and looks away is not a retention limit,
+    // and this call was written and then not wired up on the first pass.
+    crate::tuner::purge_if_expired();
     // Recover any half-applied changes from a previous crash into the global rollback log (item 7.3).
     crate::rollback::load_global();
     // Profilleri tohumla (ilk çalıştırma) — UI ListProfiles çağırınca hazır olsun.
     crate::profile::seed_defaults();
     audit("listening");
 
-    // P0-e fix (2026-08-14): protection used to boot-auto-start unconditionally here (servis
-    // çalışıyor = korumalı), with no persisted preference to gate it and no way for `off` to
-    // survive a service/process restart — Command::Stop only ever touched the in-memory Engine
-    // this serve_blocking() call owns, so the NEXT invocation (reboot, crash+SCM-restart, a fresh
-    // --console run) always came back up protected regardless of what the user last chose. Opt-in
-    // is the smaller fix (no new persistence layer to build and get right tonight): protection now
-    // starts ONLY on an explicit Command::Start, same as `Engine::new()`'s own default of
-    // running=false/state=Idle a few lines up. See also state.svelte.ts's autoProtect flag.
-    audit("listening idle (boot auto-protect kapalı — P0-e, kullanıcı Start demeden korumaya geçmez)");
+    // ---- Boot restore (2026-08-16) -----------------------------------------------------------
+    //
+    // History: protection once auto-started here unconditionally ("service running = protected"),
+    // with no persisted preference and no way for `off` to survive a restart. That was removed
+    // (P0-e) because unconditional is the wrong answer — but removing it left the OTHER wrong
+    // answer: after a reboot the machine always came up unprotected, whatever the user had chosen,
+    // with nothing in the UI explaining why. That is what "I restarted my PC and evorift did not
+    // start" was.
+    //
+    // The missing piece was never the trigger, it was the SETTING. `PersistedState` now records
+    // both what was running and whether the user wants it restored, so this is neither a surprise
+    // nor a silent refusal — it does what the user last asked for, and the choice is a toggle.
+    {
+        let persisted = load_state();
+        if persisted.autostart && persisted.running {
+            let engine = Arc::clone(&engine);
+            // On a background thread: the pipe listener below must be accepting connections before
+            // protection finishes coming up, or the UI's first status call at login times out
+            // against a service that is busy applying DNS.
+            std::thread::spawn(move || {
+                crate::elog::info(
+                    "service",
+                    "boot_restore",
+                    &format!(
+                        "restoring protection after boot (mode={}, as last chosen)",
+                        if persisted.mode.is_empty() { "hafif" } else { &persisted.mode }
+                    ),
+                );
+                // At boot the network stack is frequently not ready yet: adapters still coming up,
+                // no default route, DNS unset. Applying into that fails in ways that look like an
+                // engine fault. Wait for actual connectivity, bounded — if the machine is genuinely
+                // offline we start anyway and let verification report the truth.
+                wait_for_network(Duration::from_secs(60));
+
+                // The wait above can last a minute, and the UI is reachable throughout it. If the
+                // user opened the app and turned protection OFF during that window, restoring it
+                // now would override a decision they just made — the same surprise the earlier
+                // unconditional boot-auto-protect caused. `Stop` persists `running:false`, so
+                // re-reading the file is enough to tell.
+                if !load_state().running {
+                    crate::elog::info(
+                        "service",
+                        "boot_restore_cancelled",
+                        "protection was switched off while waiting for the network — not restoring",
+                    );
+                    return;
+                }
+                // Same check against live state, for a Stop that arrived after the file read.
+                if engine.lock().unwrap_or_else(|p| p.into_inner()).state != RunState::Idle {
+                    return;
+                }
+
+                match dispatch(&engine, Command::Start) {
+                    Response::Status(_) => {}
+                    Response::Error { message } => {
+                        crate::elog::error("service", "boot_restore_failed", &message)
+                    }
+                    _ => {}
+                }
+            });
+        } else {
+            audit(&format!(
+                "listening idle (autostart={}, last state running={})",
+                persisted.autostart, persisted.running
+            ));
+        }
+    }
 
     // winws watchdog + per-app off PID exclusion (5 sn). Paused durumda (Auto-Pilot) dokunma.
     {
@@ -1177,20 +2030,37 @@ pub fn serve_blocking() -> io::Result<()> {
         const EXCL_MIN_INTERVAL: Duration = Duration::from_secs(60);
         let mut last_excl_change: Option<std::time::Instant> = None;
         let mut last_dns_heal: Option<std::time::Instant> = None;
+        let mut last_dns_check: Option<std::time::Instant> = None;
+        // Say the "per-app off is not enforced" thing ONCE, not every 5 seconds.
+        let mut warned_no_exclusion = false;
         loop {
             std::thread::sleep(Duration::from_secs(5));
-            let (running, paused, off_paths) = {
+            let (running, paused, off_paths, excl_matters) = {
                 let e = engine.lock().unwrap_or_else(|p| p.into_inner());
-                (e.running, e.state == RunState::Paused, e.off_app_paths())
+                (e.running, e.state == RunState::Paused, e.off_app_paths(), e.exclusion_matters())
             };
             if paused {
-                continue; // Auto-Pilot adayları çalışıyor → karışma
+                continue; // a measurement is running → do not interfere
             }
-            let excl = if running && !off_paths.is_empty() {
+            // Scanning at all is gated on the exclusion being worth its cost — see
+            // `Engine::exclusion_matters`. Under both shipped modes this is false, so the engine is
+            // never restarted for port churn, and `pid_scan` (a full socket-table enumeration) is
+            // not run every 5 seconds either.
+            let excl = if running && excl_matters && !off_paths.is_empty() {
                 crate::pid_scan::scan(&off_paths)
             } else {
                 crate::pid_scan::ExclusionPorts::default()
             };
+            if running && !excl_matters && !off_paths.is_empty() && !warned_no_exclusion {
+                warned_no_exclusion = true;
+                crate::elog::info(
+                    "watchdog",
+                    "exclusion_not_needed",
+                    "per-app 'off' is not enforced at the packet layer: nothing that could corrupt a \
+                     connection runs outside the hostlist, so excluding those apps would only buy \
+                     engine restarts",
+                );
+            }
             // SCOPED on purpose. std::sync::Mutex is NOT reentrant: this guard must be dropped
             // before the WARP and DNS blocks below take the lock again, or the watchdog deadlocks
             // against itself on its very first tick and holds the engine lock forever — every
@@ -1212,16 +2082,24 @@ pub fn serve_blocking() -> io::Result<()> {
                         }
                         e.dpi.set_exclusion(&excl);
                     }
-                    let strat = e.current_strategy();
-                    let hl = e.hostlist.clone();
-                    // Respawn Result'ı ASLA at ma — çocuk süreç kayıp ve yeniden başlatılamıyorsa (bundle
-                    // silindi/kilitlendi) running:true yalan söylemeye devam eder (bkz. evorift-remote-testing:
-                    // "silent success is the enemy").
-                    if let Err(m) = e.dpi.start(&strat, &hl) {
-                        e.running = false;
-                        e.state = RunState::Error;
-                        e.reset_verify();
-                        audit(&format!("watchdog: motor kayboldu, yeniden başlatılamadı: {m}"));
+                    // DNS-only protection legitimately has no child process. Respawning one here
+                    // would start a winws the plan never asked for, every 5 seconds, forever.
+                    if e.dpi_expected {
+                        let strat = e.current_strategy();
+                        let hl = e.hostlist.clone();
+                        // NEVER discard the respawn Result — if the child is gone and cannot be
+                        // restarted (bundle deleted/locked), running:true would keep lying.
+                        if let Err(m) = e.dpi.start(&strat, &hl) {
+                            e.running = false;
+                            e.dpi_expected = false;
+                            e.state = RunState::Error;
+                            e.reset_verify();
+                            crate::elog::error(
+                                "watchdog",
+                                "respawn_failed",
+                                &format!("the engine process is gone and could not be restarted: {m}"),
+                            );
+                        }
                     }
                 }
             }
@@ -1281,10 +2159,22 @@ pub fn serve_blocking() -> io::Result<()> {
                     && !e.dns.is_empty()
                     && e.dns != "auto"
             };
+            // Rate-limit the CHECK, not just the repair.
+            //
+            // FIXED 2026-08-16, from the user's audit log: `dns verify: güvenli (Cloudflare)` on
+            // EVERY 5-second tick, indefinitely. `last_dns_heal` was only stamped when drift was
+            // actually found, so on a machine whose DNS is fine it stayed `None`, `may_heal` stayed
+            // true, and the check ran forever at tick rate. Before the native resolver read landed
+            // that meant spawning PowerShell every 5 seconds for the entire time protection was on
+            // and unverified — which is both the CPU cost and the log noise visible in that file.
+            let may_check = last_dns_check
+                .map(|t: std::time::Instant| t.elapsed() >= Duration::from_secs(60))
+                .unwrap_or(true);
             let may_heal = last_dns_heal
                 .map(|t: std::time::Instant| t.elapsed() >= Duration::from_secs(60))
                 .unwrap_or(true);
-            if needs_dns_check && may_heal {
+            if needs_dns_check && may_check && may_heal {
+                last_dns_check = Some(std::time::Instant::now());
                 let want = {
                     let e = engine.lock().unwrap_or_else(|p| p.into_inner());
                     e.dns.clone()
@@ -1418,65 +2308,234 @@ mod tests {
         assert_eq!(e.verify_gen, 1, "generation bumps so an in-flight probe from before the reset is discarded");
     }
 
-    /// The two shipped protection modes must map onto the winws arg builder the way the UI claims:
-    /// Hafif = hostlist-gated to Discord+Roblox, Güçlü = catch-all (NO --hostlist) using the
-    /// MEASURED desync chain. Asserted through the real Strategy → build_args path so a change to
-    /// either mode's wiring fails here instead of shipping a label that overstates its scope.
+    /// THE regression guard for the 2026-08-16 failure: "Güçlü Koruma" made a working site
+    /// unreachable, and dropping DOWN to "Hafif" fixed it.
     ///
-    /// The two modes no longer share one chain: Güçlü switched to the TTL-based preset after a
-    /// sweep showed it was the only configuration that opened the hardest domains (400/400 under
-    /// load, 2026-08-15) while every c1 repeat count left them at 0%.
+    /// The mechanism was that Güçlü ran a route-dependent forgery (`fake` + `ttl` with no fooling)
+    /// with `hostlist_only = false`, i.e. over EVERY TLS/443 flow on the machine. Where the DPI is
+    /// not at the assumed hop distance the forged ClientHello reaches the real server and the
+    /// server drops the connection.
+    ///
+    /// So the invariant is not about which preset wins a sweep. It is: whatever runs catch-all
+    /// must be incapable of corrupting a connection. Asserted through the real
+    /// `plan_for_mode` → `build_args` path, so any future edit that widens a chain's scope without
+    /// making it harmless fails here rather than on a user's machine.
     #[cfg(windows)]
     #[test]
-    fn protection_modes_produce_the_scope_the_ui_promises() {
+    fn no_mode_may_run_a_harmful_chain_catch_all() {
         let winws = crate::engine::make_engine("zapret");
 
-        // --- Hafif: gated to the Discord + Roblox list ---
+        for mode in ["hafif", "guclu"] {
+            let mut e = Engine::new();
+            e.mode = mode.into();
+            let (strat, hosts) = e.plan_for_mode(mode);
+
+            // 1. The aggressive layer is ALWAYS gated. Nothing reaches traffic we were not asked
+            //    to fix except through the fallback layer checked below.
+            assert!(
+                strat.hostlist_only,
+                "{mode}: the selected chain must be hostlist-gated, never machine-wide"
+            );
+            assert!(!hosts.is_empty(), "{mode}: a gated chain with an empty hostlist covers nothing");
+
+            let args = winws.build_args(&strat, &hosts);
+            assert!(
+                args.iter().any(|a| a.starts_with("--hostlist=")),
+                "{mode}: the built command line must carry --hostlist"
+            );
+
+            // 2. If the mode has a catch-all fallback layer, that layer must be harmless.
+            if !strat.fallback.is_empty() {
+                let fb = crate::engine::strategy_by_id(strat.fallback);
+                assert!(
+                    fb.is_harmless(),
+                    "{mode}: catch-all fallback '{}' can forge a packet the real server accepts — \
+                     this is exactly what broke an unrelated site",
+                    fb.id
+                );
+            }
+        }
+    }
+
+    /// The watchdog respawns a dead engine from `current_strategy()`, NOT from `plan_for_mode()`.
+    /// If those two disagree, a crash silently reconfigures protection into something the user
+    /// never chose — and nothing reports it, because from the outside the engine just came back.
+    ///
+    /// The concrete divergence this guards: catalog entries carry their own `fallback`, and a
+    /// harmless one carries none, so a Güçlü session whose measured winner was harmless used to
+    /// lose its catch-all layer on every respawn.
+    #[test]
+    fn a_watchdog_respawn_rebuilds_the_same_plan() {
+        for mode in ["hafif", "guclu"] {
+            let mut e = Engine::new();
+            e.mode = mode.into();
+            let (planned, hosts) = e.plan_for_mode(mode);
+            // Mirror what load_mode() commits to the Engine.
+            e.strategy = planned.id.to_string();
+            e.hostlist = hosts;
+            e.hostlist_only = true;
+            e.fallback = planned.fallback;
+            e.repeats_override = None;
+
+            let respawned = e.current_strategy();
+            assert_eq!(respawned.id, planned.id, "{mode}: respawn changed the chain");
+            assert_eq!(
+                respawned.fallback, planned.fallback,
+                "{mode}: respawn dropped or changed the catch-all layer"
+            );
+            assert_eq!(
+                respawned.hostlist_only, planned.hostlist_only,
+                "{mode}: respawn changed the scope gating"
+            );
+        }
+    }
+
+    /// Layer order is load-bearing: winws hands a flow to the FIRST profile whose filter matches.
+    /// The gated aggressive stage must therefore be emitted BEFORE the catch-all fallback, or the
+    /// fallback swallows every flow and the hostlist stage becomes unreachable — which is how the
+    /// old third `--filter-tcp=443` block ended up as dead code nobody noticed for months.
+    #[cfg(windows)]
+    #[test]
+    fn guclu_emits_the_gated_stage_before_the_catch_all_layer() {
+        let winws = crate::engine::make_engine("zapret");
         let mut e = Engine::new();
-        e.strategy = "c1".into();
-        e.repeats_override = Some(HAFIF_REPEATS);
-        e.hostlist_only = true;
-        e.hostlist = HAFIF_HOSTLIST.iter().map(|s| s.to_string()).collect();
-        let hafif = winws.build_args(&e.current_strategy(), &e.hostlist);
+        e.mode = "guclu".into();
+        let (strat, hosts) = e.plan_for_mode("guclu");
+        // Force a chain distinguishable from the fallback so the two stages are tellable apart.
+        let mut strat = strat;
+        strat.desync = "fake,multidisorder";
+        strat.fooling = "md5sig";
+        let args = winws.build_args(&strat, &hosts);
+
+        let tls_stages: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a == "--filter-tcp=443")
+            .map(|(i, _)| i)
+            .collect();
         assert!(
-            hafif.iter().any(|a| a.starts_with("--hostlist=")),
-            "Hafif must gate by hostlist — otherwise it silently covers everything"
+            tls_stages.len() >= 2,
+            "Güçlü needs both a gated TLS stage and a catch-all fallback stage, found {}",
+            tls_stages.len()
         );
+        // The gated TLS stage owns a --hostlist between its own --filter-tcp=443 and the next one.
+        // (The port-80 stage earlier in the line also carries one, which is why this looks at the
+        // window between the two TLS stages rather than at the first --hostlist in the argv.)
         assert!(
-            hafif.iter().any(|a| a == &format!("--dpi-desync-repeats={HAFIF_REPEATS}")),
-            "Hafif must use HAFIF_REPEATS on the primary TLS stage"
+            args[tls_stages[0]..tls_stages[1]].iter().any(|a| a.starts_with("--hostlist=")),
+            "the first TLS stage must be hostlist-gated — otherwise the aggressive chain is catch-all"
         );
+        // Everything from the fallback stage onward must be free of hostlist gating, or the
+        // catch-all layer covers nothing and unknown blocked sites get no help at all.
         assert!(
-            HAFIF_HOSTLIST.contains(&"discord.com") && HAFIF_HOSTLIST.contains(&"roblox.com"),
-            "Hafif's scope is Discord + Roblox"
+            !args[tls_stages[1]..].iter().any(|a| a.starts_with("--hostlist=")),
+            "the fallback layer must stay catch-all"
         );
+    }
+
+    /// The other half of the same rule: when the gated chain and the catch-all fallback would emit
+    /// the IDENTICAL TLS stage — which is exactly what an untuned Güçlü looks like, since both
+    /// layers resolve to the harmless default — only the catch-all is emitted. Two identical
+    /// profiles would do the same work twice and charge a per-connection hostlist lookup for the
+    /// privilege.
+    #[cfg(windows)]
+    #[test]
+    fn an_identical_gated_and_fallback_chain_collapses_to_one_stage() {
+        let winws = crate::engine::make_engine("zapret");
+        let mut s = crate::engine::strategy_by_id(crate::engine::SAFE_FALLBACK);
+        s.hostlist_only = true;
+        s.fallback = crate::engine::SAFE_FALLBACK;
+        let hosts: Vec<String> = CORE_HOSTLIST.iter().map(|h| h.to_string()).collect();
+        let args = winws.build_args(&s, &hosts);
+
+        let tls_stages = args.iter().filter(|a| **a == "--filter-tcp=443").count();
+        assert_eq!(tls_stages, 1, "identical chains must collapse to a single TLS stage");
+        // And the one that survives is the CATCH-ALL — dropping the catch-all instead would silently
+        // narrow the mode to its hostlist.
+        let idx = args.iter().position(|a| a == "--filter-tcp=443").unwrap();
         assert!(
-            !HAFIF_HOSTLIST.iter().any(|d| d.contains("youtube")),
-            "Hafif must NOT quietly widen beyond the scope its label promises"
+            !args[idx..].iter().take_while(|a| **a != "--new").any(|a| a.starts_with("--hostlist=")),
+            "the surviving TLS stage must be the catch-all one"
+        );
+        // HTTP/80 and QUIC stay gated: the fallback only ever covers TLS, so collapsing those too
+        // would drop coverage rather than remove duplication.
+        assert!(
+            args.iter().any(|a| a.starts_with("--hostlist=")),
+            "the non-TLS gated stages must still be present"
+        );
+    }
+
+    /// Güçlü must never deploy a route-dependent chain that has not been measured ON THIS LINE.
+    /// With no tuning file present the selection has to fall back to a harmless chain — the property
+    /// that makes "wide" safe to switch on before any measurement has happened.
+    #[test]
+    fn untuned_guclu_falls_back_to_a_harmless_chain() {
+        // No tuning for a fabricated network key → `tuned_strategy_id` must not hand back an
+        // aggressive preset just because one is compiled in.
+        let id = Engine::tuned_strategy_id();
+        let s = crate::engine::strategy_by_id(&id);
+        if crate::tuner::load().map(|t| crate::tuner::is_current(&t)).unwrap_or(false) {
+            // A real measurement exists on this machine; it was allowed to pick anything it proved.
+            return;
+        }
+        assert!(
+            s.is_harmless(),
+            "with no measurement for this line, Güçlü selected '{id}', which can corrupt traffic"
+        );
+    }
+
+    /// The two modes must differ in SCOPE, and Hafif must stay the narrow one — its whole promise
+    /// is "cannot make anything worse", which a catch-all layer would quietly break.
+    #[test]
+    fn hafif_stays_narrow_and_guclu_is_wider() {
+        let e = Engine::new();
+        let (hs, hhosts) = e.plan_for_mode("hafif");
+        let (_gs, ghosts) = e.plan_for_mode("guclu");
+
+        assert_eq!(hs.fallback, "", "Hafif must have NO catch-all layer — outside its list it touches nothing");
+        assert!(hs.is_harmless(), "Hafif's own chain must be harmless too");
+        assert!(hhosts.iter().any(|d| d.contains("discord")));
+        assert!(hhosts.iter().any(|d| d.contains("roblox")));
+        assert!(
+            !hhosts.iter().any(|d| d.contains("youtube")),
+            "Hafif must not quietly widen beyond the scope its label promises"
+        );
+        assert!(ghosts.len() > hhosts.len(), "Güçlü must actually cover more than Hafif");
+        for d in &hhosts {
+            assert!(ghosts.contains(d), "Güçlü must be a superset of Hafif; missing {d}");
+        }
+    }
+
+    /// What gets DEPLOYED must be what was MEASURED.
+    ///
+    /// The tuner measures "off" as the bare line — no gated stage, no fallback layer. If deployment
+    /// then bolted a catch-all layer onto that verdict, the shipped configuration would be one no
+    /// measurement ever covered, and every HTTPS connection on the machine would get TCP
+    /// segmentation applied to solve a problem the measurement said does not exist.
+    #[test]
+    fn an_off_verdict_deploys_nothing_at_all() {
+        let measured = crate::tuner::candidate_strategy_for_test("off");
+        assert_eq!(measured.fallback, "", "the tuner measures 'off' bare");
+        assert!(measured.desync.is_empty());
+
+        // The deployment side must agree. `fallback_for` is the production rule itself, not a copy
+        // of it — `plan_for_mode` calls exactly this. (Calling `plan_for_mode` directly would make
+        // the test depend on whatever tuning file this machine happens to have.)
+        let deployed_fallback = fallback_for("off");
+        assert_eq!(deployed_fallback, measured.fallback, "deployment must match the measurement");
+        assert_eq!(
+            fallback_for("c1"),
+            crate::engine::SAFE_FALLBACK,
+            "any chain that DOES touch packets still gets the harmless catch-all layer"
         );
 
-        // --- Güçlü: catch-all, TTL-based desync (the measured winner) ---
-        let mut g = Engine::new();
-        g.strategy = GUCLU_STRATEGY.into();
-        g.repeats_override = None; // the 400/400 run used the preset's own value — do not override
-        g.hostlist_only = false;
-        g.hostlist = HAFIF_HOSTLIST.iter().map(|s| s.to_string()).collect(); // populated but unused
-        let guclu = winws.build_args(&g.current_strategy(), &g.hostlist);
+        let hosts: Vec<String> = WIDE_HOSTLIST.iter().map(|s| s.to_string()).collect();
+        let mut s = crate::engine::strategy_by_id("off");
+        s.hostlist_only = true;
+        s.fallback = deployed_fallback;
         assert!(
-            !guclu.iter().any(|a| a.starts_with("--hostlist=")),
-            "Güçlü is catch-all: a --hostlist flag here would silently narrow it"
-        );
-        // The TTL knobs ARE the reason this config beats the hard domains — losing them silently
-        // would take the hard sites back to 0% while everything still looked fine.
-        assert!(
-            guclu.iter().any(|a| a.starts_with("--dpi-desync-ttl=")) ||
-            guclu.iter().any(|a| a.starts_with("--dpi-desync-autottl=")),
-            "Güçlü's measured config is TTL-based; without a ttl/autottl arg it is not that config"
-        );
-        assert_ne!(
-            crate::engine::strategy_by_id(GUCLU_STRATEGY).desync,
-            "",
-            "Güçlü's strategy id must resolve to a real preset, not fall through to an empty one"
+            !crate::engine::has_web_stage(&s, &hosts),
+            "an 'off' verdict must start no engine process at all — DNS-only means DNS-only"
         );
     }
 

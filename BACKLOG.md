@@ -53,6 +53,70 @@ process). evorift's version also stops and deletes the stale `WinDivert`/`WinDiv
 cleanup. Feeds CLAUDE.md rule 3b(b) as evidence that this class of problem already has a
 working solution in the current app.
 
+### P0-e — Protection can survive `evorift-ctl off`, and nothing guarantees exclusive control — `[?]` observed, root cause NOT confirmed, do not fix without a live repro first
+
+Surfaced 2026-08-13 during MVP live-verification (TEST 2, fake-packet sweep) on the remote
+test laptop. **Record only — this was explicitly not chased to a fix tonight.**
+
+**What was observed, with evidence:**
+- Mid-sweep, `docs/captures/test2-20260813/` shows a `dpi-desync-repeats` sweep job stopped
+  making progress at `repeats=13`: `evorift-ctl strat` started failing with `STRAT HATA:
+  bağlantı kapandı` then `servise ulaşılamadı: ... (os error 2)` — the named pipe the job's
+  own `evorift-svc.exe --console` instance had bound was gone. The job's own `finally` block
+  then also failed to reach any instance to send `off`.
+- `evorift-svc.exe`'s own `audit.log` (pulled via `diag-svc-log.ps1`) shows, in the same
+  window, a `Set-DnsClientServerAddress -ResetServerAddresses` / `Clear-DnsClientCache` call
+  the sweep script never issued — that action only exists in `dns::reset_dns()` and the
+  deadman's `recovery::run`, and it landed between `set_strategy c1 repeats_override=Some(6)`
+  and `Some(7)`, i.e. mid-measurement, not at teardown.
+- Roughly 3 minutes after the sweep job had already exited, a follow-up check
+  (`diag-rescue-check.ps1`) found `evorift-svc.exe` (pid 18068) and `winws.exe` (pid 24864)
+  both alive and StartTime **after** the job process that was supposed to own them had ended
+  — i.e. protection was live on the laptop with nothing in this session driving it, and the
+  earlier `evorift-ctl off` inside that job's teardown had reported `STOP OK running=false`
+  on an *earlier* successful call, yet a DPI instance was live again minutes later.
+- General connectivity (ping 1.1.1.1, DNS) was fine at check time — this is not currently an
+  active internet-cut, but it is a live, unauthorized-by-this-session protection instance.
+
+**What was ruled out:** a full read-only scan (`diag-find-autostart.ps1`) of Scheduled Tasks
+(`Get-ScheduledTask`, all tasks + actions), registry `Run`/`RunOnce` (`HKLM`, `HKLM\WOW6432Node`,
+`HKCU`, and every discoverable user hive under `HKEY_USERS`), every profile's Startup folder,
+and `Get-CimInstance Win32_Service` found **no configured auto-start mechanism** — `evorift-testd`
+is the only service present, no scheduled task or Run key mentions `evorift`/`winws` anywhere.
+Concurrent use of the laptop by another session was also checked and ruled out.
+
+**So the mechanism is unconfirmed.** Two candidate explanations, neither verified:
+1. `winws.exe` is spawned as a plain child process of `evorift-svc.exe` without being placed
+   in the same Job Object the codebase already has a helper for (`proc::spawn_with_job`,
+   see `proc.rs` — `spawn_with_job_assigns_to_job` test exists, but it's unconfirmed whether
+   `WinwsEngine::start()` in `engine.rs` actually uses it). If not, killing `evorift-svc.exe`
+   by PID (which `evorift-ctl off` does NOT do — `Stop` only flips `e.running=false` and calls
+   `dpi.stop()`, it never exits the process) leaves an orphaned `winws.exe` that nothing is
+   tracking, and a *second* `evorift-svc.exe --console` launched by a later test run would
+   have no way to know the old `winws.exe` is still filtering traffic.
+2. Something launched a fresh `evorift-svc.exe` interactively or via a mechanism this scan
+   didn't cover (elevated scheduled tasks under `\Microsoft\Windows\` sometimes need extra
+   permissions to enumerate even from `LocalSystem` — not fully ruled out).
+
+**Possible link to the reported "internet cut" symptom** (`DIAGNOSE-INTERNET-CUT.md`,
+`docs/STATUS.md`): if a second `evorift-svc`/`winws` instance can survive the one the user
+believes they stopped, "closing the app / reopening it fixed it" has an obvious, mundane
+explanation that has nothing to do with WARP or strategy selection — the user's `off` never
+reached the instance that was actually holding the WinDivert filter open.
+
+**Next step for whoever picks this up:** reproduce deliberately (run two `evorift-svc.exe
+--console` instances back to back, confirm whether the second bind fails loudly or silently,
+check whether `winws.exe`'s `Command::spawn()` call site in `engine.rs` assigns a Job Object),
+before touching any fix. `evorift-ctl off` / `Command::Stop` not verifying the DPI engine
+process is actually gone (only flipping internal state) is the most concrete, cheaply-checked
+lead.
+
+**Mitigation shipped tonight, test-harness side only:** `scripts/test1-discord.ps1`,
+`test2-repeats-sweep.ps1`, and `test3-toggle.ps1` now refuse to start if any `evorift-svc`/
+`winws` process is already running before the job launches its own — see "Exclusive control"
+in `docs/REMOTE-TESTING.md`. This makes the test harness's own measurements trustworthy again;
+it does not fix the underlying product behavior.
+
 ---
 
 ## DECISIONS — architect-ready briefs (drafted, not yet called)

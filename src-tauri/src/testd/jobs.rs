@@ -140,20 +140,25 @@ fn build_command(
             check_args(args)?;
             let resolved =
                 sandbox::resolve_existing(canonical_root, script).map_err(JobError::BadPath)?;
+            // Hand the script a normal path, not the canonical `\\?\` one -- see
+            // sandbox::strip_verbatim. The canonical form was used for the containment check
+            // above; a child process must never see it.
+            let script_path = sandbox::strip_verbatim(&resolved);
             let mut cmd = crate::sys::os_command("powershell");
             cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]);
-            cmd.arg(&resolved);
+            cmd.arg(&script_path);
             cmd.args(args);
-            let display = format!("powershell -File {} {}", resolved.display(), args.join(" "));
+            let display = format!("powershell -File {} {}", script_path.display(), args.join(" "));
             Ok((cmd, display, clamp_timeout(*timeout_secs, default_timeout_secs)))
         }
         JobSpec::Exec { program, args, timeout_secs } => {
             check_args(args)?;
             let resolved =
                 sandbox::resolve_existing(canonical_root, program).map_err(JobError::BadPath)?;
-            let mut cmd = crate::sys::os_command(&resolved.to_string_lossy());
+            let program_path = sandbox::strip_verbatim(&resolved);
+            let mut cmd = crate::sys::os_command(&program_path.to_string_lossy());
             cmd.args(args);
-            let display = format!("{} {}", resolved.display(), args.join(" "));
+            let display = format!("{} {}", program_path.display(), args.join(" "));
             Ok((cmd, display, clamp_timeout(*timeout_secs, default_timeout_secs)))
         }
     }
@@ -223,7 +228,9 @@ pub fn start(
     let stderr = std::fs::File::create(dir.join("stderr.txt")).map_err(JobError::Io)?;
     std::fs::write(dir.join("cmd.txt"), &command).map_err(JobError::Io)?;
 
-    cmd.current_dir(canonical_root)
+    // The working directory a script sees must be usable by that script: `Get-Location` returning
+    // `\\?\C:\evorift-test` makes Join-Path throw and forward slashes unresolvable.
+    cmd.current_dir(sandbox::strip_verbatim(canonical_root))
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));

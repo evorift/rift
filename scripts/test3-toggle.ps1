@@ -104,6 +104,17 @@ if ($missing.Count -gt 0) {
 $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 Step "elevated" $elevated "running elevated = $elevated"
 
+# Exclusive-control guard (P0-e, BACKLOG.md): a pre-existing evorift-svc/winws process means
+# unknown prior state is already live -- every gap measurement here requires exclusive control.
+$preexisting = Get-Process -Name "evorift-svc", "winws" -ErrorAction SilentlyContinue
+if ($preexisting) {
+    $list = ($preexisting | ForEach-Object { "$($_.ProcessName) pid=$($_.Id) started=$($_.StartTime)" }) -join "; "
+    Step "exclusive control" $false "evorift-svc/winws already running before this job started ($list) -- ABORTING"
+    Save-Summary
+    exit 1
+}
+Step "exclusive control" $true "no pre-existing evorift-svc/winws process found"
+
 if (Test-Path -LiteralPath $stopFlag) { Remove-Item -LiteralPath $stopFlag -Force -ErrorAction SilentlyContinue }
 if (Test-Path -LiteralPath $probeLog) { Remove-Item -LiteralPath $probeLog -Force -ErrorAction SilentlyContinue }
 "ts_iso,elapsed_ms,status,rtt_ms" | Out-File -FilePath $probeLog -Encoding ascii

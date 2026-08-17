@@ -176,6 +176,17 @@ if (-not $discordExe) {
 }
 Step "discord present" $true $discordExe
 
+# Exclusive-control guard (P0-e, BACKLOG.md): a pre-existing evorift-svc/winws process means
+# unknown prior state is already live -- the mode verdict here requires exclusive control.
+$preexisting = Get-Process -Name "evorift-svc", "winws" -ErrorAction SilentlyContinue
+if ($preexisting) {
+    $list = ($preexisting | ForEach-Object { "$($_.ProcessName) pid=$($_.Id) started=$($_.StartTime)" }) -join "; "
+    Step "exclusive control" $false "evorift-svc/winws already running before this job started ($list) -- ABORTING"
+    Save-Summary
+    exit 1
+}
+Step "exclusive control" $true "no pre-existing evorift-svc/winws process found"
+
 $svcProc = $null
 try {
     $env:EVORIFT_PRIVILEGED = "1"

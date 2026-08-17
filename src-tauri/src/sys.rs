@@ -13,9 +13,24 @@ use std::process::Command as OsCommand;
 /// Rotate a log file once it reaches this size (docs/02 §5: SplitWire rotates at 1 MB).
 const LOG_MAX_BYTES: u64 = 1024 * 1024;
 
-/// Log directory: `%PROGRAMDATA%\evorift\logs`.
+/// Log directory: `<install dir>\logs`, i.e. beside the executables.
+///
+/// Was `%PROGRAMDATA%\evorift\logs`, mirrored to the user's Desktop by the UI process. Moved here
+/// on request: the logs belong with the app's own files, not scattered across two other locations.
+/// This also removes the mirror entirely — one directory, written directly by whoever produced the
+/// line, instead of a copy that could lag or diverge.
+///
+/// Both binaries live in the same directory, so the service (SYSTEM) and the UI (elevated, per the
+/// requireAdministrator manifest) write to the SAME file set — which is what makes a single folder
+/// answer "what happened" without cross-referencing.
+///
+/// Falls back to the ProgramData path if the executable's location cannot be resolved, so logging
+/// never silently stops.
 pub fn log_dir() -> std::path::PathBuf {
-    crate::ipc::data_dir().join("logs")
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("logs")))
+        .unwrap_or_else(|| crate::ipc::data_dir().join("logs"))
 }
 
 fn ts_millis() -> u128 {
@@ -33,6 +48,18 @@ fn should_rotate(size: u64) -> bool {
 /// version+timestamp header on a fresh/rotated file. Best-effort — logging must never fail a command.
 fn write_log_to(dir: &std::path::Path, category: &str, line: &str) {
     use std::io::Write;
+    // REDACT AT THE SINK, not at the call sites.
+    //
+    // The rule is absolute: no requested domain, and no IP resolved for one, is ever written to
+    // disk in plaintext. Enforcing that at each `log()`/`audit()` call would mean auditing ~40 call
+    // sites today and trusting every future one — and the failure mode is silent, because a leaked
+    // hostname looks exactly like a useful log line. This is the ONE function every log file in the
+    // app passes through, so it is the only place the guarantee can actually hold.
+    //
+    // Deliberately NOT applied to the in-memory event ring: that feeds the UI, which is the user's
+    // own screen showing the user their own blocked site. "Never written" is about persistence and
+    // anything that can leave the machine, not about what the user is allowed to see.
+    let line = &crate::elog::redact(line);
     let _ = std::fs::create_dir_all(dir);
     let path = dir.join(format!("{category}.log"));
     let mut fresh = !path.exists();
@@ -59,6 +86,13 @@ fn write_log_to(dir: &std::path::Path, category: &str, line: &str) {
 /// Append a timestamped line to a per-operation log file (e.g. `dns`, `repair`, `setup`).
 pub fn log(category: &str, line: &str) {
     write_log_to(&log_dir(), category, line);
+}
+
+/// Test-only: write through the REAL sink into a chosen directory, so the redaction guarantee can
+/// be proven end-to-end rather than only on the helper function.
+#[cfg(test)]
+pub fn log_to_dir_for_test(dir: &std::path::Path, category: &str, line: &str) {
+    write_log_to(dir, category, line);
 }
 
 /// Audit log → stderr + `%PROGRAMDATA%\evorift\logs\audit.log` (rotating).

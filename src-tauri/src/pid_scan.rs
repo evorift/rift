@@ -9,10 +9,35 @@
 
 use crate::netinfo;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Eq)]
 pub struct ExclusionPorts {
     pub tcp: Vec<u16>,
     pub udp: Vec<u16>,
+    /// PIDs of the "off" apps these ports were collected from.
+    ///
+    /// THIS is the identity of an exclusion set, not the ports — see the `PartialEq` impl below.
+    pub pids: Vec<u32>,
+}
+
+/// Two exclusion sets are "the same" when they describe the same PROCESSES, even if the individual
+/// source ports differ.
+///
+/// FIXED 2026-08-16, from a log the user sent: `winws yeniden baslatiliyor` every 60 seconds, for as
+/// long as the app was open. Applying an exclusion set restarts winws (there is no filter hot
+/// reload), and the set was compared BY PORT. Source ports are ephemeral by definition — Steam and
+/// OneDrive ship "off" by default and open and close connections constantly — so the set differed on
+/// essentially every check, and the engine tore itself down and rebuilt once per rate-limit window,
+/// killing every live connection on the machine each time. That is the "works, then stops, then
+/// works" behaviour, and it was structural: no rate limit fixes a comparison that is always unequal.
+///
+/// Comparing by PID makes the trigger "an off-app started or exited", which is a real, infrequent
+/// event. The cost is bounded and small: ports a tracked process opens BETWEEN restarts are not
+/// excluded until the next one, so that app keeps being bypassed for a while. Being bypassed for a
+/// few minutes is a far smaller harm than dropping every connection on the machine every minute.
+impl PartialEq for ExclusionPorts {
+    fn eq(&self, other: &Self) -> bool {
+        self.pids == other.pids
+    }
 }
 
 impl ExclusionPorts {
@@ -68,5 +93,10 @@ pub fn scan(off_paths: &[String]) -> ExclusionPorts {
     tcp.dedup();
     udp.sort_unstable();
     udp.dedup();
-    ExclusionPorts { tcp, udp }
+    // Sorted + deduped so the PID set is a stable identity: the enumeration order of sockets must
+    // not make an unchanged set of processes look like a changed one.
+    let mut pids: Vec<u32> = pid_is_off.iter().filter(|(_, off)| **off).map(|(pid, _)| *pid).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    ExclusionPorts { tcp, udp, pids }
 }

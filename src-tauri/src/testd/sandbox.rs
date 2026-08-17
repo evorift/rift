@@ -116,6 +116,32 @@ pub fn canonical_root(root: &Path) -> Result<PathBuf, PathError> {
     root.canonicalize().map_err(|e| PathError::Io(e.to_string()))
 }
 
+/// Drop the Windows verbatim `\\?\` prefix that `canonicalize` always adds.
+///
+/// Canonical paths are exactly right for the containment check and exactly wrong to hand to a
+/// child process. A verbatim path switches off all Win32 path normalization, and PowerShell then
+/// breaks in ways that read as "the directory does not exist":
+///
+///   * `docs/captures` never resolves, because `/` is no longer translated to `\`;
+///   * `Join-Path` fails outright with "the value of argument drive is null".
+///
+/// That cost a full remote run: the state captures were written correctly but the script that
+/// listed them could not see its own working directory. So every path leaving this process for a
+/// child -- the working directory and the program path -- goes through here first. Containment
+/// checks keep using the canonical form; only what a script sees is normalized.
+///
+/// UNC verbatim paths (`\\?\UNC\server\share`) are left alone: stripping the prefix there would
+/// produce `UNC\server\share`, which is not a path at all. The sandbox is a local directory, so
+/// this case does not arise in practice, but silently corrupting it would be worse than skipping.
+pub fn strip_verbatim(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        // `UNC\...` is the one verbatim form that does not survive having its prefix removed.
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
 /// Resolve a path that must already exist (`/pull`, `/run`'s program).
 ///
 /// The canonicalisation is the real boundary: it follows symlinks and junctions, so a link
@@ -241,6 +267,45 @@ mod tests {
         assert_eq!(validate_relative("   "), Err(PathError::Empty));
         assert_eq!(validate_relative("."), Err(PathError::Empty));
         assert!(matches!(validate_relative("a\0b"), Err(PathError::IllegalComponent(_))));
+    }
+
+    #[test]
+    fn the_verbatim_prefix_is_stripped_for_child_processes() {
+        // What canonicalize() hands back on Windows, and what a script must be given instead.
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\C:\evorift-test")),
+            PathBuf::from(r"C:\evorift-test")
+        );
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\C:\evorift-test\scripts\capture-state.ps1")),
+            PathBuf::from(r"C:\evorift-test\scripts\capture-state.ps1")
+        );
+        // Already-plain paths are untouched.
+        assert_eq!(
+            strip_verbatim(Path::new(r"C:\evorift-test")),
+            PathBuf::from(r"C:\evorift-test")
+        );
+        // A verbatim UNC path must NOT be stripped -- `UNC\server\share` is not a path.
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\UNC\server\share\x")),
+            PathBuf::from(r"\\?\UNC\server\share\x")
+        );
+    }
+
+    /// The real round trip: canonicalising a root and then stripping it must yield a path that
+    /// still points at the same directory, and one a child process can actually use.
+    #[test]
+    fn a_stripped_canonical_root_still_resolves() {
+        let base = std::env::temp_dir().join("evorift-testd-verbatim-test");
+        std::fs::create_dir_all(base.join("docs")).expect("make dirs");
+        let canonical = canonical_root(&base).expect("canonicalise");
+        let stripped = strip_verbatim(&canonical);
+
+        assert!(!stripped.to_string_lossy().starts_with(r"\\?\"), "prefix must be gone");
+        assert!(stripped.is_dir(), "the stripped path must still be a real directory");
+        assert!(stripped.join("docs").is_dir(), "and joining below it must work");
+
+        std::fs::remove_dir_all(&base).expect("cleanup");
     }
 
     /// End-to-end containment against a real directory: the canonical-prefix test is what

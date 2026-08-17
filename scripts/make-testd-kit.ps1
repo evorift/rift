@@ -125,6 +125,14 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $files = @(
     @{ Source = $ExeSource;                                     Name = "evorift-testd.exe" },
+    # The operator-facing entry point: double-click, click Yes on UAC, done.
+    @{ Source = (Join-Path $PSScriptRoot "INSTALL.bat");         Name = "INSTALL.bat" },
+    # Read-only diagnostic for when the controller cannot reach the agent.
+    @{ Source = (Join-Path $PSScriptRoot "CHECK.bat");           Name = "CHECK.bat" },
+    @{ Source = (Join-Path $PSScriptRoot "check.ps1");           Name = "check.ps1" },
+    # Repairs DNS damage done by an older build's runaway deadman.
+    @{ Source = (Join-Path $PSScriptRoot "FIX-DNS.bat");         Name = "FIX-DNS.bat" },
+    @{ Source = (Join-Path $PSScriptRoot "fix-dns.ps1");         Name = "fix-dns.ps1" },
     @{ Source = (Join-Path $PSScriptRoot "testd-install.ps1");   Name = "testd-install.ps1" },
     @{ Source = (Join-Path $PSScriptRoot "link-setup.ps1");      Name = "link-setup.ps1" },
     @{ Source = (Join-Path $PSScriptRoot "capture-state.ps1");   Name = "capture-state.ps1" }
@@ -356,44 +364,62 @@ WHAT THIS IS
   in step 2: .\install.ps1 -ControllerIp 192.168.77.1
 
 --------------------------------------------------------------------------------
- STEP 2 -- INSTALL THE AGENT (on this laptop, elevated)
+ STEP 2 -- INSTALL THE AGENT (on this laptop)
 --------------------------------------------------------------------------------
 
-      .\install.ps1
+      DOUBLE-CLICK  INSTALL.bat
 
-  It verifies the link, installs the binary to C:\Program Files\evorift-testd\,
-  generates a token, registers the "evorift-testd" service (auto-start,
-  auto-restart), opens ONE firewall rule scoped to $ControllerIp and port $Port
-  only, starts the service and confirms it is listening.
+  A Windows popup asks for administrator rights. Click YES. That is the only
+  interaction. Nothing has to be typed.
 
-  At the end it prints a 64-character TOKEN. Write it down. It is shown once, it is
-  never sent over the network, and you need it on the controller.
+  It verifies this laptop can reach the controller, installs the binary to
+  C:\Program Files\evorift-testd\, generates a token, registers the
+  "evorift-testd" service (auto-start, auto-restart), opens ONE firewall rule
+  scoped to $ControllerIp and port $Port only, starts the service and confirms it
+  is listening.
 
---------------------------------------------------------------------------------
- STEP 3 -- PAIR THE CONTROLLER (on your desktop)
---------------------------------------------------------------------------------
+  If it cannot reach the controller it stops and says so. Nothing is half
+  installed.
 
-      `$env:EVORIFT_TESTD_TOKEN = '<the token from step 2>'
-      .\scripts\remote.ps1 -AgentIp <laptop IP> -Action health
-
-  Expect {"ok": true, ... "fires": 0}.
-      403 -> the laptop does not have your address in its allowlist; re-run
-             install.ps1 with the right -ControllerIp
-      401 -> the token does not match
-      no answer -> back to step 1
+  When it finishes it saves the token to  testd.token  NEXT TO INSTALL.bat --
+  so if you ran this from a USB stick, the token is already on that stick.
 
 --------------------------------------------------------------------------------
- STEP 4 -- RUN A FULL CYCLE (on your desktop)
+ STEP 3 -- BACK ON THE DESKTOP
 --------------------------------------------------------------------------------
 
-      .\scripts\remote.ps1 -AgentIp <laptop IP> -Action cycle ``
-                           -BuildPath .\src-tauri\target\release\evorift.exe
+      Plug the USB stick in, then DOUBLE-CLICK  REMOTE-TEST.bat
+      (it is in the repo root, next to the scripts folder)
 
-  Push build -> capture before -> run verification -> capture after -> pull
-  everything back -> check whether the deadman fired.
+  It finds testd.token on the stick by itself and shows a menu:
 
-  READ THE LAST LINE. If it says the deadman fired, the laptop recovered itself
-  partway through and the captures do NOT describe an uninterrupted run.
+      [1] Connection test      -> expect  "ok": true
+      [2] RUN THE FULL TEST    -> push build, capture, pull results back
+      [3] EMERGENCY rescue     -> tell the laptop to kill evorift now
+      [4] Diagnose the network
+      [5] Exit
+
+  Start with [1]. If it says "ok": true you are connected; go to [2].
+
+      403 -> the laptop does not have the desktop's address in its allowlist;
+             re-run INSTALL.bat with the right controller address
+      401 -> wrong token
+      no answer -> the laptop is off, or the agent is not running
+
+--------------------------------------------------------------------------------
+ STEP 4 -- READING THE RESULT
+--------------------------------------------------------------------------------
+
+  Option [2] pushes the build, captures the laptop's state before / during /
+  after, pulls everything back, and checks whether the laptop had to rescue
+  itself. It takes several minutes and the laptop WILL go unreachable in the
+  middle -- that is expected, the script keeps retrying.
+
+  READ THE LAST LINE:
+      "the deadman did not fire"  -> results are trustworthy
+      "THE DEADMAN FIRED"         -> the laptop rescued itself partway through,
+                                     so the captures do NOT describe an
+                                     uninterrupted run
 
 --------------------------------------------------------------------------------
  IF THE LAPTOP GOES DARK AND DOES NOT COME BACK
@@ -414,12 +440,17 @@ WHAT THIS IS
  WHAT IS IN THIS KIT
 --------------------------------------------------------------------------------
 
-  install.ps1          run this -- one-shot setup, controller address baked in
+  INSTALL.bat          <<< DOUBLE-CLICK THIS. Everything else is machinery.
+  CHECK.bat            <<< double-click this if the desktop cannot reach the
+                           agent. Read-only; writes check-report.txt next to it.
+  check.ps1            what CHECK.bat runs
+  install.ps1          what INSTALL.bat runs; controller address baked in
   testd-install.ps1    the real installer (install.ps1 calls it)
   link-setup.ps1       IP diagnosis, direct-cable setup, revert
   evorift-testd.exe    the agent
   capture-state.ps1    the state capture the agent runs remotely
   MANIFEST.txt         SHA-256 of every file above
+  testd.token          appears AFTER install - carry it back to the desktop
 
   Verify the kit arrived intact:
       Get-FileHash .\evorift-testd.exe -Algorithm SHA256
@@ -477,13 +508,15 @@ Write-Host ""
 Write-Host "  Folder : $OutDir"
 Write-Host "  Zip    : $ZipPath"
 Write-Host ""
-Write-Host "  Copy it to the test laptop (USB stick is fine -- nothing in the kit"
-Write-Host "  needs internet), then on the laptop, in an ELEVATED PowerShell:"
+Write-Host "  1. Copy the FOLDER above onto a USB stick (not the zip -- the folder,"
+Write-Host "     so the token can be written back onto the stick)."
 Write-Host ""
-Write-Host "      cd <where you unzipped it>" -ForegroundColor White
-Write-Host "      .\README.txt         # read this first" -ForegroundColor White
-Write-Host "      .\install.ps1" -ForegroundColor White
+Write-Host "  2. On the test laptop:   DOUBLE-CLICK  INSTALL.bat" -ForegroundColor White
+Write-Host "     Click YES on the administrator popup. Nothing to type."
+Write-Host ""
+Write-Host "  3. Bring the stick back here, then:  DOUBLE-CLICK  REMOTE-TEST.bat" -ForegroundColor White
+Write-Host "     It finds the token on the stick and gives you a menu."
 Write-Host ""
 Write-Host "  If the two machines cannot see each other, start with:" -ForegroundColor DarkGray
-Write-Host "      .\link-setup.ps1 -Action diagnose -PeerIp $ControllerIp" -ForegroundColor DarkGray
+Write-Host "      .\scripts\link-setup.ps1 -Action diagnose -PeerIp $ControllerIp" -ForegroundColor DarkGray
 Write-Host ""

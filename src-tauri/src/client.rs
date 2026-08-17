@@ -48,6 +48,23 @@ fn command_once(cmd: &Command) -> Result<Response, String> {
 /// iyidir — sonsuza dek dönen bir spinner kullanıcıya hiçbir şey söylemiyor.
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
+/// Deliberately long budget for commands that MEASURE rather than configure.
+///
+/// `Tune` walks a candidate ladder, starting and probing the engine once per candidate. On a badly
+/// blocked line each probe can burn its full timeout, so the honest worst case is minutes, not
+/// seconds. Under the flat 45s budget the call would abort mid-measurement, the UI would report
+/// "the service did not respond", and the tuning thread would keep running and mutating the engine
+/// underneath — a failure that looks like a hang and leaves inconsistent state behind.
+const MEASURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// How long this specific command is allowed to take.
+fn timeout_for(cmd: &Command) -> std::time::Duration {
+    match cmd {
+        Command::Tune { .. } | Command::AutoPilot { .. } => MEASURE_TIMEOUT,
+        _ => CALL_TIMEOUT,
+    }
+}
+
 /// `command_once`, ama ZAMAN AŞIMLI.
 ///
 /// FIXED 2026-08-14 (canlı test): pipe akışının (interprocess `Stream`) okuma/yazma zaman aşımı
@@ -61,11 +78,12 @@ fn command_once_bounded(cmd: &Command) -> Result<Response, String> {
     std::thread::spawn(move || {
         let _ = tx.send(command_once(&c)); // alıcı gitmişse hata yutulur (zaman aşımı olmuş demektir)
     });
-    match rx.recv_timeout(CALL_TIMEOUT) {
+    let budget = timeout_for(cmd);
+    match rx.recv_timeout(budget) {
         Ok(r) => r,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
-            "servis {}s içinde yanıt vermedi (kilitlenmiş olabilir)",
-            CALL_TIMEOUT.as_secs()
+            "the service did not answer within {}s (it may be stuck)",
+            budget.as_secs()
         )),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             Err("servis çağrısı beklenmedik şekilde sonlandı".into())

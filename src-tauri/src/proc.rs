@@ -18,6 +18,75 @@ pub fn kill_image(name: &str) {
 #[cfg(not(windows))]
 pub fn kill_image(_name: &str) {}
 
+/// Is any process with this image name running? Sub-millisecond, fully in-process.
+///
+/// Exists so the hot start path stops paying for a `taskkill` spawn (~100ms of process creation)
+/// just to discover there was nothing to kill. Enumerating the snapshot and comparing names is
+/// cheaper than creating one process, and it is the check `taskkill` would do anyway.
+#[cfg(windows)]
+pub fn image_running(name: &str) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            // Cannot tell → assume it might be running, so the caller still does its cleanup.
+            // Guessing "no" here would skip a kill that was actually needed.
+            return true;
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = false;
+        if Process32FirstW(snap, &mut e) != 0 {
+            loop {
+                let end = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+                let exe = String::from_utf16_lossy(&e.szExeFile[..end]);
+                if exe.eq_ignore_ascii_case(name) {
+                    found = true;
+                    break;
+                }
+                if Process32NextW(snap, &mut e) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snap);
+        found
+    }
+}
+#[cfg(not(windows))]
+pub fn image_running(_name: &str) -> bool {
+    false
+}
+
+/// Is this PID still alive? Used by `is_running()` so engine state is MEASURED rather than
+/// remembered (CLAUDE.md rule 10) without needing `&mut` access to the `Child`.
+///
+/// A process that exited but has not been reaped is a zombie whose handle still opens; on Windows
+/// `GetExitCodeProcess` distinguishes the two via STILL_ACTIVE, which is what this checks.
+#[cfg(windows)]
+pub fn pid_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    const STILL_ACTIVE: u32 = 259;
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h == 0 {
+            return false; // gone, or not ours to query — either way not a live engine we own
+        }
+        let mut code: u32 = 0;
+        let ok = GetExitCodeProcess(h, &mut code);
+        CloseHandle(h);
+        ok != 0 && code == STILL_ACTIVE
+    }
+}
+#[cfg(not(windows))]
+pub fn pid_alive(_pid: u32) -> bool {
+    false
+}
+
 /// KILL_ON_JOB_CLOSE bayraklı bir Job Object oluştur (handle isize; 0 = başarısız). Son handle kapanınca
 /// kernel atanan tüm süreçleri öldürür. [`assign_to_job`] ile çocuk atanır, [`close_job`] ile kapatılır.
 #[cfg(windows)]

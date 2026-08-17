@@ -71,3 +71,13 @@ WinDivert-2.2.2-A/
 /svelte.config.js
 /vite.config.js
 /tsconfig.json
+
+# Build/test artefacts staged for the laptop and for releases (2026-08-17).
+# ~180 MB of installers and portable trees across these folders. They are BUILD OUTPUT — the
+# distribution policy is to ship them as release assets, not to carry them in git history, where
+# they can never be removed without a rewrite.
+/build-0*/
+/artifacts/
+/portable/
+# Test-harness config: the LAN address of the test laptop. Machine-specific, not product.
+/scripts/.agent-address

@@ -37,9 +37,27 @@ param(
 $ErrorActionPreference = 'Continue'
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+
+# $PSScriptRoot may be a Windows verbatim path (\\?\C:\...) when this script is launched by the
+# remote test agent, which resolves paths canonically. Verbatim paths switch off all path
+# normalization, and Join-Path then fails outright with "cannot bind argument ... it is null".
+# That produced a silent disaster once: every probe below failed, nothing was written, and the
+# script still exited 0, so the controller reported a successful capture of nothing.
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$outDir = Join-Path $repoRoot "docs\captures\$timestamp-$Label"
-New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+if ($repoRoot.StartsWith('\\?\')) { $repoRoot = $repoRoot.Substring(4) }
+$repoRoot = $repoRoot.TrimEnd('\')
+
+$outDir = "$repoRoot\docs\captures\$timestamp-$Label"
+New-Item -ItemType Directory -Force -Path $outDir -ErrorAction SilentlyContinue | Out-Null
+
+# Fail loudly if the output directory is not usable. $ErrorActionPreference is 'Continue' on
+# purpose -- a failing probe IS a valid data point -- but that must not extend to being unable to
+# write results at all. Without this guard the failure is invisible until someone opens an empty
+# capture folder days later.
+if (-not $outDir -or -not (Test-Path -LiteralPath $outDir)) {
+    Write-Error "Cannot create the capture directory: $outDir (repoRoot='$repoRoot', PSScriptRoot='$PSScriptRoot')"
+    exit 1
+}
 
 function Invoke-Capture {
     param(

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::audit::{Audit, Entry};
-use super::config::Config;
+use super::config::{self, Config};
 use super::http::{self, Head};
 use super::jobs::{self, JobSpec};
 use super::recovery::{self, Deadman};
@@ -115,11 +115,49 @@ pub fn run(cfg: Config, shared_token: String) -> Result<(), ServeError> {
         TcpListener::bind(addr).map_err(|source| ServeError::Bind { addr, source })?;
 
     audit.note(&format!(
-        "agent started: bound {addr}, sandbox {}, allowlist [{}], deadman {}s",
+        "agent started: bound {addr}{}, sandbox {}, allowlist [{}], deadman {}s",
+        if cfg.bind_auto { " (auto)" } else { "" },
         canonical_root.display(),
-        cfg.allowlist.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(" "),
+        cfg.allowlist.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>().join(" "),
         cfg.deadman_secs
     ));
+
+    // Follow DHCP.
+    //
+    // With `bind_ip: "auto"` the bound address was chosen from the routing table at startup. If
+    // the lease later moves, the listening socket survives on an address the machine no longer
+    // has, and the agent is silently unreachable — which is exactly how a day was lost once.
+    // Detect the change and exit; the service's restart policy brings the agent straight back on
+    // the new address. Restarting is far simpler than rebuilding the listener in place, and the
+    // SCM already knows how to do it.
+    if cfg.bind_auto {
+        if let Some(toward) = cfg.controller_hint() {
+            let bound = cfg.bind_ip;
+            let audit_for_watch = Arc::clone(&audit);
+            let spawned = std::thread::Builder::new()
+                .name("testd-addr-watch".to_string())
+                .spawn(move || loop {
+                    std::thread::sleep(Duration::from_secs(30));
+                    match config::local_address_toward(toward) {
+                        Some(current) if current != bound => {
+                            audit_for_watch.note(&format!(
+                                "ADDRESS CHANGED: bound {bound} but this machine now reaches the \
+                                 controller from {current}. Exiting so the service restarts and \
+                                 rebinds."
+                            ));
+                            eprintln!("[testd] address moved {bound} -> {current}; restarting");
+                            // Non-zero so the SCM treats it as a failure and applies the
+                            // configured restart action.
+                            std::process::exit(2);
+                        }
+                        _ => {}
+                    }
+                });
+            if let Err(e) = spawned {
+                eprintln!("[testd] address watcher not started: {e} (a DHCP change will go unnoticed)");
+            }
+        }
+    }
     eprintln!("[testd] listening on {addr}, sandbox {}", canonical_root.display());
 
     let agent = Arc::new(Agent {
@@ -153,14 +191,26 @@ pub fn run(cfg: Config, shared_token: String) -> Result<(), ServeError> {
             continue;
         }
 
+        // Keep our own handles: the closure below MOVES its copies, so the error path needs
+        // separate ones to release the slot with.
+        let agent_for_thread = Arc::clone(&agent);
+        let live_for_thread = Arc::clone(&live);
         let spawned = std::thread::Builder::new()
             .name("testd-conn".to_string())
             .spawn(move || {
-                handle_connection(&agent, stream);
-                live.fetch_sub(1, Ordering::SeqCst);
+                handle_connection(&agent_for_thread, stream);
+                live_for_thread.fetch_sub(1, Ordering::SeqCst);
             });
         if let Err(e) = spawned {
+            // RELEASE THE SLOT. `live` was incremented above, but the decrement lives inside the
+            // closure that just failed to start — so every failed spawn leaked one of only
+            // MAX_CONNECTIONS slots, permanently. Eight of them and the agent refuses every
+            // connection for the rest of its life, including `/health`, which is also what the
+            // deadman switch watches: the recovery mechanism would be locked out by the same
+            // exhaustion it exists to survive.
+            live.fetch_sub(1, Ordering::SeqCst);
             eprintln!("[testd] connection thread not started: {e}");
+            agent.audit.note("connection thread could not be started; slot released");
         }
     }
     Ok(())
@@ -349,7 +399,9 @@ fn handle_health(ctx: &Ctx<'_>, stream: &mut TcpStream) {
         agent.started.elapsed().as_secs(),
         agent.deadman.timeout().as_secs(),
         agent.deadman.fire_count(),
-        json_escape(&agent.canonical_root.display().to_string()),
+        // Report the usable form, not the `\\?\` canonical one -- this string is read by humans
+        // and pasted into commands.
+        json_escape(&sandbox::strip_verbatim(&agent.canonical_root).display().to_string()),
     );
     // Heartbeats are the highest-volume request by far; auditing each one would bury the
     // records that matter. The deadman's own fire records are what prove liveness history.

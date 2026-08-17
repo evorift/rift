@@ -73,12 +73,49 @@ fn hidden(program: &str) -> std::process::Command {
 pub fn create_bundle(out_zip: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let logs = crate::sys::log_dir();
     write_summary(&logs).map_err(|e| format!("summary write failed: {e}"))?;
-    let out = hidden("powershell")
+
+    // Zip a REDACTED COPY, never the live log directory.
+    //
+    // Our own log writer already redacts at the sink, so in principle this is a second pass over
+    // clean text. It exists because the bundle also carries files we did NOT write — `winws.log` is
+    // a bundled third-party binary's stdout, and its format is not ours to guarantee. A support
+    // bundle is the one artefact explicitly meant to be sent to someone else, so it is the last
+    // place to assume the inputs were already safe.
+    //
+    // Also drops the previous bundle: `evorift-bundle.zip` lives inside the folder being archived,
+    // so a second run would otherwise pack the first run's zip inside the new one.
+    let stage = logs.join("_bundle_stage");
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage).map_err(|e| format!("bundle staging failed: {e}"))?;
+
+    let entries = std::fs::read_dir(&logs).map_err(|e| format!("logs unreadable: {e}"))?;
+    for e in entries.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if !p.is_file() {
+            continue;
+        }
+        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if name.ends_with(".zip") {
+            continue; // never nest a previous bundle inside this one
+        }
+        let body = std::fs::read_to_string(&p).unwrap_or_default();
+        let cleaned: String =
+            body.lines().map(crate::elog::redact).collect::<Vec<_>>().join("\r\n");
+        let _ = std::fs::write(stage.join(&name), cleaned);
+    }
+
+    let result = hidden("powershell")
         .args(["-NoProfile", "-Command", compress_script()])
-        .env("EVORIFT_LOGS", &logs)
+        .env("EVORIFT_LOGS", &stage)
         .env("EVORIFT_ZIP", out_zip)
         .output()
-        .map_err(|e| format!("Compress-Archive failed to run: {e}"))?;
+        .map_err(|e| format!("Compress-Archive failed to run: {e}"));
+
+    // Staging is removed whatever happened — it holds a full copy of the logs, and leaving it
+    // behind would quietly double the footprint of the thing we just took care to minimise.
+    let _ = std::fs::remove_dir_all(&stage);
+
+    let out = result?;
     if out.status.success() {
         Ok(out_zip.to_path_buf())
     } else {

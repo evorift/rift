@@ -227,6 +227,19 @@ pub fn persist(report: &Report, state_dir: &Path, sandbox_root: &Path) -> Option
 /// Armed by the first `/health` from an allowlisted peer, so an agent that boots before the
 /// controller is ever started does not fire at an idle laptop. Once armed it stays armed: the
 /// whole point is that silence after contact means the link died mid-test.
+/// How many times in a row the switch may fire without hearing from the controller before it
+/// disarms itself and waits.
+///
+/// Recovery is idempotent: once evorift and winws are dead and DNS is back on DHCP, running it
+/// again changes nothing. Repeating it forever is not harmless though — each pass resets DNS,
+/// clears the DoH registration and flushes the resolver cache, so an idle agent slowly makes the
+/// machine under test *worse* and contaminates the very captures it exists to collect. Observed
+/// for real: 37 fires overnight left the laptop unable to resolve DNS during a baseline capture.
+///
+/// Three attempts covers the case where the first pass does not stick (something respawning the
+/// engine); beyond that, more attempts are not going to help and only add damage.
+const MAX_CONSECUTIVE_FIRES: u64 = 3;
+
 pub struct Deadman {
     /// Monotonic base. `Instant` is immune to clock changes, which matters because some of the
     /// failure modes under test involve time synchronisation dying with the network.
@@ -234,6 +247,9 @@ pub struct Deadman {
     last_health_ms: AtomicU64,
     armed: AtomicBool,
     fires: AtomicU64,
+    /// Fires since the last heartbeat. Reset by `touch`, checked against
+    /// [`MAX_CONSECUTIVE_FIRES`] to decide whether to keep going or stand down.
+    consecutive_fires: AtomicU64,
     timeout: Duration,
     state_dir: PathBuf,
     sandbox_root: PathBuf,
@@ -246,6 +262,7 @@ impl Deadman {
             last_health_ms: AtomicU64::new(0),
             armed: AtomicBool::new(false),
             fires: AtomicU64::new(0),
+            consecutive_fires: AtomicU64::new(0),
             timeout,
             state_dir,
             sandbox_root,
@@ -257,9 +274,18 @@ impl Deadman {
     }
 
     /// Record a heartbeat and arm the switch. Called by `/health`.
+    ///
+    /// Hearing from the controller also clears the consecutive-fire count: the switch stood down
+    /// because nobody was listening, and now somebody is.
     pub fn touch(&self) {
         self.last_health_ms.store(self.now_ms(), Ordering::SeqCst);
+        self.consecutive_fires.store(0, Ordering::SeqCst);
         self.armed.store(true, Ordering::SeqCst);
+    }
+
+    /// Fires since the last heartbeat.
+    pub fn consecutive_fires(&self) -> u64 {
+        self.consecutive_fires.load(Ordering::SeqCst)
     }
 
     pub fn is_armed(&self) -> bool {
@@ -298,8 +324,10 @@ impl Deadman {
                 }
                 let silent = deadman.since_last_health().as_secs();
                 let n = deadman.fires.fetch_add(1, Ordering::SeqCst) + 1;
+                let streak = deadman.consecutive_fires.fetch_add(1, Ordering::SeqCst) + 1;
                 audit.note(&format!(
-                    "DEADMAN FIRE #{n}: no /health for {silent}s (limit {}s) — running recovery",
+                    "DEADMAN FIRE #{n} (attempt {streak}/{MAX_CONSECUTIVE_FIRES} since last contact): \
+                     no /health for {silent}s (limit {}s) — running recovery",
                     deadman.timeout.as_secs()
                 ));
                 let report = run(&format!("deadman-{n}"));
@@ -309,9 +337,23 @@ impl Deadman {
                     report.summary(),
                     saved.map(|p| p.display().to_string()).unwrap_or_else(|| "not saved".into())
                 ));
-                // Restart the window rather than re-firing every poll while the link stays
-                // down: recovery is destructive, and hammering it adds nothing.
-                deadman.last_health_ms.store(deadman.now_ms(), Ordering::SeqCst);
+
+                if streak >= MAX_CONSECUTIVE_FIRES {
+                    // Stand down. The machine is as recovered as this routine can make it, and
+                    // continuing would keep resetting DNS every window for as long as the agent
+                    // is idle — degrading the machine under test and polluting its captures.
+                    // The next /health re-arms it.
+                    deadman.armed.store(false, Ordering::SeqCst);
+                    audit.note(&format!(
+                        "DEADMAN DISARMED after {streak} consecutive fires with no contact from \
+                         the controller. Recovery is idempotent, so repeating it would only keep \
+                         resetting DNS. Re-arms automatically on the next /health."
+                    ));
+                } else {
+                    // Restart the window rather than re-firing every poll while the link stays
+                    // down: recovery is destructive, and hammering it adds nothing.
+                    deadman.last_health_ms.store(deadman.now_ms(), Ordering::SeqCst);
+                }
             })
             // A failure to spawn the watchdog means the agent has no deadman at all, which is
             // the one thing this design cannot ship without — surface it loudly.
@@ -363,6 +405,37 @@ mod tests {
     #[test]
     fn the_fire_count_starts_at_zero() {
         assert_eq!(deadman(1000).fire_count(), 0);
+        assert_eq!(deadman(1000).consecutive_fires(), 0);
+    }
+
+    /// The switch must stand down after a few fruitless attempts instead of firing forever.
+    ///
+    /// Regression: left armed and idle overnight it fired 37 times, and because every fire
+    /// resets DNS to DHCP and flushes the resolver cache, the laptop could no longer resolve
+    /// names during a baseline capture. The agent was damaging the machine it was measuring.
+    #[test]
+    fn the_switch_disarms_after_repeated_fires_and_a_heartbeat_rearms_it() {
+        let d = deadman(30);
+        d.touch();
+        assert!(d.is_armed());
+
+        // Simulate the watchdog firing, without running the real (destructive) routine.
+        for attempt in 1..=MAX_CONSECUTIVE_FIRES {
+            let streak = d.consecutive_fires.fetch_add(1, Ordering::SeqCst) + 1;
+            if streak >= MAX_CONSECUTIVE_FIRES {
+                d.armed.store(false, Ordering::SeqCst);
+            }
+            assert_eq!(d.consecutive_fires(), attempt);
+        }
+
+        assert!(!d.is_armed(), "must stand down rather than keep resetting DNS forever");
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(!d.is_expired(), "a disarmed switch must not fire again on its own");
+
+        // The controller coming back re-arms it and clears the streak.
+        d.touch();
+        assert!(d.is_armed(), "a heartbeat must re-arm the switch");
+        assert_eq!(d.consecutive_fires(), 0, "and reset the streak");
     }
 
     #[test]

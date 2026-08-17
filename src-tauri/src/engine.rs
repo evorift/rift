@@ -80,6 +80,21 @@ pub struct Strategy {
     pub fake_quic: &'static str,
     /// apply only to hostlist domains instead of catch-all (--hostlist). Wired in item 1.3.
     pub hostlist_only: bool,
+    /// LAYERED MODE (2026-08-16). Id of a HARMLESS catch-all chain applied to everything the
+    /// hostlist did NOT match, emitted as a lower-priority winws profile after the gated ones.
+    /// Empty = no fallback layer (pure hostlist gating, or pure catch-all).
+    ///
+    /// This exists because of a real, user-reported failure: "Güçlü Koruma" ran ONE route-dependent
+    /// chain (`fake` + `ttl=1` + `autottl=3`, no fooling) catch-all over every TLS/443 flow. On the
+    /// line it was tuned against that opened the hard domains; on a different line the forged
+    /// ClientHello outlives the DPI hop, reaches the real server, and the server kills the
+    /// connection — so protection BROKE a site that needed no bypass at all, while "Hafif" (which
+    /// simply never touched that domain) worked. A strategy that can make things worse than off is
+    /// not a stronger strategy.
+    ///
+    /// The fix is layering, not tuning: the aggressive chain is gated to domains known to need it,
+    /// and everything else gets a chain that cannot corrupt a connection (see `is_harmless`).
+    pub fallback: &'static str,
 }
 
 impl Strategy {
@@ -87,6 +102,11 @@ impl Strategy {
     /// Emits only the fields that are set, so the default "c1" reproduces the live-verified primary
     /// stage byte-for-byte. Does NOT include the trailing `--new` separator (the caller adds it).
     pub fn tls_profile_args(&self) -> Vec<String> {
+        // The "off" chain has no desync method — emitting `--dpi-desync=` would be a malformed flag
+        // winws rejects at startup. No method means no stage at all, which is the point of "off".
+        if self.desync.is_empty() {
+            return Vec::new();
+        }
         let mut a = vec![
             "--filter-tcp=443".to_string(),
             format!("--dpi-desync={}", self.desync),
@@ -114,6 +134,33 @@ impl Strategy {
         }
         a
     }
+
+    /// Can this chain damage a connection to a server that needs no bypass at all?
+    ///
+    /// The distinction is whether a forged packet can survive as far as the real server:
+    ///
+    ///  * NO forged packet at all (`multisplit`/`multidisorder`/`split2`/`disorder2` alone) — the
+    ///    ClientHello is only segmented/reordered at the TCP layer. Every TLS server reassembles
+    ///    TCP, so this is transparent to the endpoint. Harmless.
+    ///  * A forged packet INVALIDATED by a fooling option (`md5sig`, `badseq`, `badsum`) — the real
+    ///    server drops it (bad TCP-MD5 option / out-of-window sequence / bad checksum) while the
+    ///    DPI, which does not validate, swallows it. Harmless to the endpoint.
+    ///  * A forged packet kept valid and merely TTL-limited (`--dpi-desync-ttl` / `autottl` with no
+    ///    fooling) — correctness depends entirely on the DPI being exactly the assumed number of
+    ///    hops away. Guess wrong and the forgery reaches the server, which then tears the
+    ///    connection down. NOT harmless: this is precisely what broke Güçlü Koruma.
+    ///
+    /// Only harmless chains are ever allowed to run catch-all over traffic nobody asked us to fix.
+    pub fn is_harmless(&self) -> bool {
+        let forges = self.desync.split(',').any(|m| m.trim() == "fake");
+        if !forges {
+            return true;
+        }
+        // A forged packet is safe for the endpoint only if a fooling option guarantees the real
+        // server discards it (bad TCP-MD5 option, out-of-window sequence, bad checksum). Without
+        // one, the forgery's fate depends on TTL guessing.
+        !self.fooling.is_empty() && self.fooling != "none"
+    }
 }
 
 /// Bilinen stratejiler. "auto" = otomatik bulucu (autopilot.rs); kataloğun ilki güvenli başlangıç.
@@ -137,6 +184,7 @@ pub fn strategies() -> &'static [Strategy] {
             wf_udp: "",
             fake_quic: QUIC,
             hostlist_only: false,
+            fallback: SAFE_FALLBACK,
         },
         Strategy {
             id: "multidisorder",
@@ -152,6 +200,7 @@ pub fn strategies() -> &'static [Strategy] {
             wf_udp: "",
             fake_quic: QUIC,
             hostlist_only: false,
+            fallback: SAFE_FALLBACK,
         },
         Strategy {
             id: "fake",
@@ -167,7 +216,169 @@ pub fn strategies() -> &'static [Strategy] {
             wf_udp: "",
             fake_quic: QUIC,
             hostlist_only: false,
+            fallback: SAFE_FALLBACK,
         },
+        // ---- Harmless chains (see Strategy::is_harmless) -------------------------------------
+        // These forge nothing, or forge only packets the real server is guaranteed to drop. They
+        // are the ONLY chains allowed to run catch-all over traffic the user never asked us to fix.
+        //
+        // "safe-split": pure TCP-layer segmentation of the ClientHello. No forged packet exists at
+        // all, so there is nothing that can reach a server and confuse it — the endpoint just
+        // reassembles TCP as it always does. This is the default fallback layer.
+        Strategy {
+            id: "safe-split",
+            desync: "multisplit",
+            split_pos: "1,midsld",
+            repeats: 0,
+            fooling: "",
+            fake_tls_mod: "",
+            ttl: 0,
+            autottl: 0,
+            seqovl: 0,
+            wf_tcp: "80,443",
+            wf_udp: "",
+            fake_quic: QUIC,
+            hostlist_only: false,
+            fallback: "",
+        },
+        // Sequence-overlap split: the first segment deliberately overlaps the second, so a DPI that
+        // reassembles naively sees a different stream than the server does. Still no forgery.
+        Strategy {
+            id: "safe-seqovl",
+            desync: "multisplit",
+            split_pos: "1",
+            repeats: 0,
+            fooling: "",
+            fake_tls_mod: "",
+            ttl: 0,
+            autottl: 0,
+            seqovl: 652,
+            wf_tcp: "80,443",
+            wf_udp: "",
+            fake_quic: QUIC,
+            hostlist_only: false,
+            fallback: "",
+        },
+        // Forged ClientHello carrying a bogus TCP-MD5 signature option: DPI accepts it, the real
+        // server rejects it outright (RFC 2385 validation), so the endpoint is unaffected.
+        Strategy {
+            id: "safe-fake",
+            desync: "fake,multisplit",
+            split_pos: "1,midsld",
+            repeats: 6,
+            fooling: "md5sig",
+            fake_tls_mod: "rnd,dupsid,sni=www.google.com",
+            ttl: 0,
+            autottl: 0,
+            seqovl: 0,
+            wf_tcp: "80,443",
+            wf_udp: "",
+            fake_quic: QUIC,
+            hostlist_only: false,
+            fallback: "",
+        },
+        // Same idea via an out-of-window sequence number instead of md5sig — some DPI boxes track
+        // MD5 options but not sequence windows, and vice versa, so both are worth racing.
+        Strategy {
+            id: "safe-badseq",
+            desync: "fake,multidisorder",
+            split_pos: "1,midsld",
+            repeats: 6,
+            fooling: "badseq",
+            fake_tls_mod: "rnd,dupsid,sni=www.google.com",
+            ttl: 0,
+            autottl: 0,
+            seqovl: 0,
+            wf_tcp: "80,443",
+            wf_udp: "",
+            fake_quic: QUIC,
+            hostlist_only: false,
+            fallback: "",
+        },
+        // "off": no desync stage at all. NOT dead weight — on a line where the block is purely
+        // DNS-based, secure DNS alone opens everything and the correct engine action is to touch
+        // nothing. The tuner races this first, so "do nothing" can win on merit instead of the app
+        // mangling packets for no reason. (Measured on the user's line: the site the aggressive
+        // catch-all broke opened instantly when nothing touched it.)
+        Strategy {
+            id: "off",
+            desync: "",
+            split_pos: "",
+            repeats: 0,
+            fooling: "",
+            fake_tls_mod: "",
+            ttl: 0,
+            autottl: 0,
+            seqovl: 0,
+            wf_tcp: "80,443",
+            wf_udp: "",
+            fake_quic: QUIC,
+            hostlist_only: false,
+            fallback: "",
+        },
+    ]
+}
+
+/// The chain used for everything the aggressive hostlist did not match. Must be harmless.
+pub const SAFE_FALLBACK: &str = "safe-split";
+
+/// Candidate ladder for the per-line tuner, ORDERED LEAST-INVASIVE FIRST.
+///
+/// The order is the policy: the first candidate that opens the targets wins, so the engine
+/// converges on the gentlest chain that works rather than the most aggressive one available. TTL
+/// chains sit at the bottom because they are the only ones that can damage a working connection
+/// (see `Strategy::is_harmless`) — they are tried, but only after everything safer has failed.
+/// FIRST PASS: one representative per bypass MECHANISM, still least-invasive first.
+///
+/// Measuring all 15 candidates cost 91 seconds on the user's line (measured 2026-08-16), because
+/// every candidate needs its own winws start and its own probe and they cannot run concurrently —
+/// they would fight over the single global WinDivert driver.
+///
+/// Most of that time is spent distinguishing variants of a mechanism that has already been shown
+/// not to work on this line: if plain `fake`+md5sig opens nothing, its repeat-count and split-pos
+/// siblings almost certainly will not either. So the first pass tries one of each KIND, and the
+/// remaining variants are only measured if the first pass fails to find something good enough.
+pub fn tuner_ladder_first_pass() -> &'static [&'static str] {
+    &[
+        "off",               // do nothing
+        "safe-split",        // pure TCP segmentation
+        "safe-fake",         // forged + md5sig (server rejects it)
+        "c1",                // forged + multidisorder + md5sig
+        "superonline",       // forged + md5sig, no split
+        "tt-alt",            // bare TTL (route-dependent — first of the risky kind)
+        "turkcell-hotspot",  // bare TTL + autottl
+    ]
+}
+
+/// Everything else, tried only when the first pass did not find a good enough chain.
+pub fn tuner_ladder_second_pass() -> &'static [&'static str] {
+    &["safe-seqovl", "safe-badseq", "multidisorder", "fake", "superonline-alt", "vodafone-hotspot", "tt", "kablonet"]
+}
+
+pub fn tuner_ladder() -> &'static [&'static str] {
+    &[
+        "off",
+        "safe-split",
+        "safe-seqovl",
+        "safe-fake",
+        "safe-badseq",
+        "c1",
+        "multidisorder",
+        "fake",
+        "superonline",
+        // superonline-alt sets a TTL *and* md5sig fooling. The fooling is what decides safety: the
+        // real server rejects the forged segment on its bad MD5 option whatever its TTL was. It
+        // therefore belongs up here with the harmless chains, not down among the bare-TTL ones —
+        // a unit test enforces exactly this ordering, and caught it sitting in the wrong place.
+        "superonline-alt",
+        "vodafone-hotspot",
+        // ---- Below this line: bare TTL chains, no fooling. These are the only candidates that can
+        // damage a connection to a server that needed no bypass, so they are tried last and only
+        // ever deployed after measurement proved they work on THIS line.
+        "tt-alt",
+        "tt",
+        "kablonet",
+        "turkcell-hotspot",
     ]
 }
 
@@ -180,25 +391,25 @@ pub fn presets() -> &'static [Strategy] {
     &[
         // Türk Telekom: fake + ttl 4
         Strategy { id: "tt", desync: "fake", split_pos: "", repeats: 0, fooling: "", fake_tls_mod: "",
-            ttl: 4, autottl: 0, seqovl: 0, wf_tcp: "80,443", wf_udp: "443,50000,50100", fake_quic: QUIC, hostlist_only: false },
+            ttl: 4, autottl: 0, seqovl: 0, wf_tcp: "80,443", wf_udp: "443,50000,50100", fake_quic: QUIC, hostlist_only: false, fallback: SAFE_FALLBACK },
         // Türk Telekom Alternatif: fake + ttl 3
         Strategy { id: "tt-alt", desync: "fake", split_pos: "", repeats: 0, fooling: "", fake_tls_mod: "",
-            ttl: 3, autottl: 0, seqovl: 0, wf_tcp: "80,443", wf_udp: "443,50000,50100", fake_quic: QUIC, hostlist_only: false },
+            ttl: 3, autottl: 0, seqovl: 0, wf_tcp: "80,443", wf_udp: "443,50000,50100", fake_quic: QUIC, hostlist_only: false, fallback: SAFE_FALLBACK },
         // SuperOnline: fake + md5sig fooling
         Strategy { id: "superonline", desync: "fake", split_pos: "", repeats: 0, fooling: "md5sig", fake_tls_mod: "",
-            ttl: 0, autottl: 0, seqovl: 0, wf_tcp: "80,443", wf_udp: "443,50000,50100", fake_quic: QUIC, hostlist_only: false },
+            ttl: 0, autottl: 0, seqovl: 0, wf_tcp: "80,443", wf_udp: "443,50000,50100", fake_quic: QUIC, hostlist_only: false, fallback: SAFE_FALLBACK },
         // SuperOnline Alternatif: fake + md5sig + ttl 3 (voice port range 50000-50099)
         Strategy { id: "superonline-alt", desync: "fake", split_pos: "", repeats: 0, fooling: "md5sig", fake_tls_mod: "",
-            ttl: 3, autottl: 0, seqovl: 0, wf_tcp: "80,443", wf_udp: "443,50000-50099", fake_quic: QUIC, hostlist_only: false },
+            ttl: 3, autottl: 0, seqovl: 0, wf_tcp: "80,443", wf_udp: "443,50000-50099", fake_quic: QUIC, hostlist_only: false, fallback: SAFE_FALLBACK },
         // Kablonet: fake + ttl 4
         Strategy { id: "kablonet", desync: "fake", split_pos: "", repeats: 0, fooling: "", fake_tls_mod: "",
-            ttl: 4, autottl: 0, seqovl: 0, wf_tcp: "80,443", wf_udp: "443,50000,50100", fake_quic: QUIC, hostlist_only: false },
+            ttl: 4, autottl: 0, seqovl: 0, wf_tcp: "80,443", wf_udp: "443,50000,50100", fake_quic: QUIC, hostlist_only: false, fallback: SAFE_FALLBACK },
         // Turkcell Hotspot: fake + ttl 1 + autottl 3
         Strategy { id: "turkcell-hotspot", desync: "fake", split_pos: "", repeats: 0, fooling: "", fake_tls_mod: "",
-            ttl: 1, autottl: 3, seqovl: 0, wf_tcp: "80,443", wf_udp: "443,50000,50100", fake_quic: QUIC, hostlist_only: false },
+            ttl: 1, autottl: 3, seqovl: 0, wf_tcp: "80,443", wf_udp: "443,50000,50100", fake_quic: QUIC, hostlist_only: false, fallback: SAFE_FALLBACK },
         // Vodafone Hotspot: multisplit at pos 2 (no fake/ttl)
         Strategy { id: "vodafone-hotspot", desync: "multisplit", split_pos: "2", repeats: 0, fooling: "", fake_tls_mod: "",
-            ttl: 0, autottl: 0, seqovl: 0, wf_tcp: "80,443", wf_udp: "443,50000,50100", fake_quic: QUIC, hostlist_only: false },
+            ttl: 0, autottl: 0, seqovl: 0, wf_tcp: "80,443", wf_udp: "443,50000,50100", fake_quic: QUIC, hostlist_only: false, fallback: SAFE_FALLBACK },
     ]
 }
 
@@ -578,6 +789,79 @@ impl WinwsEngine {
         crate::proc::kill_image("winws.exe");
     }
 
+    /// Where winws's own stdout/stderr goes.
+    ///
+    /// It went NOWHERE before: the child was spawned with default (inherited) stdio from a Session-0
+    /// SYSTEM service that has no console, so every message winws printed about why it refused to
+    /// start — bad filter syntax, missing .bin, WinDivert load failure — was discarded by the OS.
+    /// That is the single biggest reason engine failures were undiagnosable from the outside.
+    pub fn log_path() -> std::path::PathBuf {
+        crate::sys::log_dir().join("winws.log")
+    }
+
+    /// Spawn winws with stdout+stderr captured to `log_path()`.
+    ///
+    /// Capture is best-effort by design: if the log file cannot be opened (locked, disk full) the
+    /// engine still starts with inherited stdio rather than refusing to protect the user because
+    /// logging is unavailable. The failure to capture is itself logged.
+    fn spawn_winws(exe: &std::path::Path, argv: &[String]) -> std::io::Result<std::process::Child> {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(argv).creation_flags(crate::proc::CREATE_NO_WINDOW).stdin(std::process::Stdio::null());
+        let path = Self::log_path();
+        let _ = std::fs::create_dir_all(crate::sys::log_dir());
+        // Roll the capture file before each start so the tail we surface on failure belongs to THIS
+        // launch, not to a run from last week. 256 KiB is far more than winws ever emits per run.
+        if std::fs::metadata(&path).map(|m| m.len() > 256 * 1024).unwrap_or(false) {
+            let _ = std::fs::remove_file(&path);
+        }
+        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(f) => match f.try_clone() {
+                Ok(f2) => {
+                    cmd.stdout(std::process::Stdio::from(f)).stderr(std::process::Stdio::from(f2));
+                }
+                Err(e) => crate::elog::warn("engine", "log_clone", &format!("winws log handle: {e}")),
+            },
+            Err(e) => crate::elog::warn(
+                "engine",
+                "log_open",
+                &format!("winws output could not be captured ({}): {e}", path.display()),
+            ),
+        }
+        cmd.spawn()
+    }
+
+    /// Wait up to `budget` for the child to prove it is staying alive.
+    /// Returns `Some(exit_code)` if it died inside the window, `None` if it is still running.
+    fn settle(child: &mut std::process::Child, budget: std::time::Duration) -> Option<i32> {
+        const STEP: std::time::Duration = std::time::Duration::from_millis(25);
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            match child.try_wait() {
+                Ok(Some(st)) => return Some(st.code().unwrap_or(-1)),
+                Ok(None) => {}
+                // A handle we cannot query is not evidence of death; let the watchdog handle it.
+                Err(_) => return None,
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(STEP);
+        }
+    }
+
+    /// Last few lines winws wrote — the actual reason it refused to run, surfaced into the error
+    /// string the UI shows instead of a bare "winws exited".
+    fn log_tail() -> String {
+        let s = std::fs::read_to_string(Self::log_path()).unwrap_or_default();
+        let tail: Vec<&str> = s.lines().rev().filter(|l| !l.trim().is_empty()).take(4).collect();
+        if tail.is_empty() {
+            "(engine produced no output)".to_string()
+        } else {
+            tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
+        }
+    }
+
     /// "Off" exclusion port'ları varsa winws WinDivert capture filter'ını yeniden derle → o uygulamaların
     /// paketleri winws'e ulaşmaz. Tüm windivert.filter/* parçaları + TCP/80,443 + exclusion clause →
     /// ProgramData'ya yazılır. Boş exclusion → None (catch-all `--wf-tcp` + `--wf-raw-part`).
@@ -648,15 +932,39 @@ impl WinwsEngine {
             args.push(format!("--wf-raw-part=@{}", pj(r"windivert.filter\windivert_part.quic_initial_ietf.txt")));
         }
 
-        // Hostlist mode (item 1.3): if the strategy is hostlist-only AND a list is given, write the
-        // domains to a file and restrict each TCP/QUIC desync profile to them (--hostlist). Default
-        // (off or empty) → catch-all (no --hostlist), reproducing the proven behavior byte-for-byte.
-        // The Discord voice/STUN group is NEVER hostlist-gated (STUN carries no hostname → would never match).
-        let hostlist_flag: Option<String> = if strategy.hostlist_only && !hostlist.is_empty() {
+        // ---- LAYERED PROFILE CONSTRUCTION (2026-08-16) -------------------------------------------
+        //
+        // winws evaluates profiles IN ORDER and the FIRST whose filter matches a flow handles it.
+        // That ordering is what makes layering possible, and it is also what made the old third
+        // stage (a second unconditional `--filter-tcp=443` block) dead code: nothing could ever
+        // reach it, because the stage above matched every 443 flow first.
+        //
+        // The layout now is:
+        //   1. aggressive chain, GATED to the hostlist  (domains known to need a bypass)
+        //   2. harmless chain, catch-all                (everything else — must not be able to hurt)
+        //   3. Discord voice/STUN                       (never gated: STUN carries no hostname)
+        //
+        // Layer 2 is why "Güçlü" can be broad without being dangerous. Before this, broad meant
+        // running ONE route-dependent forgery over every HTTPS flow on the machine.
+        let gated = strategy.hostlist_only && !hostlist.is_empty();
+        let hostlist_flag: Option<String> = if gated {
             let path = crate::ipc::data_dir().join("hostlist.txt");
             let _ = std::fs::create_dir_all(crate::ipc::data_dir());
-            if std::fs::write(&path, hostlist.join("\r\n")).is_err() {
-                eprintln!("[evorift][winws] hostlist file write failed: {}", path.display());
+            let write_result = std::fs::write(&path, hostlist.join("\r\n"));
+            // hostlist.txt CANNOT be encrypted: `winws.exe` is a separate bundled binary that reads
+            // it from disk, so ciphertext would simply stop the engine working. Narrowing the ACL is
+            // the protection that remains — it keeps another standard account on this machine from
+            // reading which sites this user asked to unblock. It does NOT stop an administrator.
+            // Re-applied on every write because the file is recreated each time.
+            crate::secure::harden_acl(&path);
+            if let Err(e) = write_result {
+                // Not cosmetic: without this file winws refuses to start, and the old code only
+                // printed to a stderr nobody reads and then passed --hostlist anyway.
+                crate::elog::error(
+                    "engine",
+                    "hostlist_write",
+                    &format!("hostlist file could not be written ({}): {e}", path.display()),
+                );
             }
             Some(format!("--hostlist={}", path.to_string_lossy()))
         } else {
@@ -668,38 +976,80 @@ impl WinwsEngine {
             }
         };
 
-        // TCP/80 (HTTP) catch-all (proven scaffold).
-        args.push("--filter-tcp=80".into());
-        args.push("--dpi-desync=fake,fakedsplit".into());
-        args.push("--dpi-desync-autottl=2".into());
-        args.push("--dpi-desync-fooling=md5sig".into());
-        push_hostlist(&mut args);
-        args.push("--new".into());
+        // ---- Layer 1: the selected chain (gated when a hostlist is in play) ----------------------
+        if !strategy.desync.is_empty() {
+            // TCP/80 (HTTP) — plaintext Host header, same scope as the TLS stage.
+            args.push("--filter-tcp=80".into());
+            args.push("--dpi-desync=fake,fakedsplit".into());
+            args.push("--dpi-desync-autottl=2".into());
+            args.push("--dpi-desync-fooling=md5sig".into());
+            push_hostlist(&mut args);
+            args.push("--new".into());
 
-        // TCP/443 (TLS) — PRIMARY desync, built from the selected typed Strategy (item 1.1).
-        // With the default/"auto"→c1 strategy this reproduces the live-verified primary stage exactly.
-        args.extend(strategy.tls_profile_args());
-        push_hostlist(&mut args);
-        args.push("--new".into());
+            // TCP/443 (TLS) — PRIMARY desync, built from the selected typed Strategy (item 1.1).
+            //
+            // Skipped when the gated chain is IDENTICAL to the catch-all fallback below: the
+            // fallback covers a strict superset of the same flows with the same treatment, so this
+            // stage could only ever do the same work twice — and its `--hostlist` costs a lookup on
+            // every single TLS connection to get there. This is the shape an untuned Güçlü takes
+            // (both layers resolve to the harmless default), i.e. the common case on a fresh install.
+            //
+            // Compared by the ARGUMENTS the two stages would emit, not by strategy id: a caller can
+            // hand us a Strategy whose id says one thing and whose desync/fooling fields say
+            // another (the tuner and the mode planner both mutate fields on a catalog entry). An
+            // id comparison would then drop a stage that was genuinely different — a unit test
+            // caught exactly that.
+            let redundant_with_fallback = gated
+                && !strategy.fallback.is_empty()
+                && strategy_by_id(strategy.fallback).tls_profile_args() == strategy.tls_profile_args();
+            if !redundant_with_fallback {
+                args.extend(strategy.tls_profile_args());
+                push_hostlist(&mut args);
+                args.push("--new".into());
+            }
 
-        // TCP/443 — secondary (badseq) fallback desync (proven scaffold, kept fixed).
-        args.push("--filter-tcp=443".into());
-        args.push("--dpi-desync=fake,multidisorder".into());
-        args.push("--dpi-desync-split-pos=midsld".into());
-        args.push("--dpi-desync-repeats=6".into());
-        args.push("--dpi-desync-fooling=badseq,md5sig".into());
-        push_hostlist(&mut args);
-        args.push("--new".into());
+            // QUIC (UDP/443, HTTP/3). Gated exactly like the TLS stage. Outside the hostlist QUIC is
+            // left ALONE on purpose: a broken HTTP/3 path is invisible (the browser silently falls
+            // back to TCP after a stall), so mangling it catch-all buys nothing and costs latency on
+            // every site the user never asked us to touch.
+            args.push("--filter-l7=quic".into());
+            args.push("--dpi-desync=fake".into());
+            args.push("--dpi-desync-repeats=11".into());
+            args.push(format!("--dpi-desync-fake-quic={fake_bin}"));
+            push_hostlist(&mut args);
+            args.push("--new".into());
+        }
 
-        // QUIC (UDP/443 HTTP/3) catch-all.
-        args.push("--filter-l7=quic".into());
-        args.push("--dpi-desync=fake".into());
-        args.push("--dpi-desync-repeats=11".into());
-        args.push(format!("--dpi-desync-fake-quic={fake_bin}"));
-        push_hostlist(&mut args);
-        args.push("--new".into());
+        // ---- Layer 2: harmless catch-all fallback ------------------------------------------------
+        // Only reachable for flows layer 1 did not claim, i.e. only when layer 1 was hostlist-gated.
+        if gated && !strategy.fallback.is_empty() {
+            let fb = strategy_by_id(strategy.fallback);
+            // Hard invariant, enforced here rather than trusted: a chain that can forge a packet the
+            // real server will ACCEPT must never run over traffic nobody asked us to fix. If a
+            // future edit points `fallback` at such a chain, drop the layer and say so — degrading
+            // to "narrower coverage" is recoverable, shipping a catch-all forgery is not.
+            if fb.is_harmless() {
+                let fb_args = fb.tls_profile_args();
+                if !fb_args.is_empty() {
+                    args.extend(fb_args);
+                    args.push("--new".into());
+                }
+            } else {
+                crate::elog::warn(
+                    "engine",
+                    "unsafe_fallback",
+                    &format!(
+                        "fallback chain '{}' can forge packets the server accepts — catch-all layer dropped, \
+                         coverage is hostlist-only",
+                        fb.id
+                    ),
+                );
+            }
+        }
 
-        // Discord voice (STUN) + Discord L7 — matches Flowseal/general.bat (proven preset). No hostlist.
+        // ---- Layer 3: Discord voice (STUN) + Discord L7 ------------------------------------------
+        // Never hostlist-gated: STUN carries no hostname, so a --hostlist here would match nothing.
+        // Scoped by L7 protocol, so it cannot touch ordinary web traffic.
         args.push("--filter-l7=discord,stun".into());
         args.push("--dpi-desync=fake".into());
         args.push("--dpi-desync-repeats=6".into());
@@ -707,6 +1057,24 @@ impl WinwsEngine {
         args.push(format!("--dpi-desync-fake-stun={fake_bin}"));
         args
     }
+
+}
+
+/// Does this (strategy, hostlist) pair actually produce any packet-level work?
+///
+/// "off" with no fallback produces only the Discord voice stage, which is worth running for Discord
+/// users but is not "protection" for the web. The caller uses this to decide whether starting a
+/// winws process is justified at all — on a DNS-only block, the honest answer is to run nothing and
+/// say so, not to keep a kernel driver attached for show.
+///
+/// Free function, not a `WinwsEngine` method: the orchestration layer needs it on every platform,
+/// and `WinwsEngine` only exists on Windows.
+pub fn has_web_stage(strategy: &Strategy, hostlist: &[String]) -> bool {
+    if !strategy.desync.is_empty() {
+        return true;
+    }
+    let gated = strategy.hostlist_only && !hostlist.is_empty();
+    gated && !strategy.fallback.is_empty()
 }
 
 #[cfg(windows)]
@@ -734,38 +1102,75 @@ impl BypassEngine for WinwsEngine {
     fn start(&mut self, strategy: &Strategy, hostlist: &[String]) -> Result<(), String> {
         if let Some(c) = self.child.as_mut() {
             if matches!(c.try_wait(), Ok(None)) {
-                return Ok(()); // hâlâ çalışıyor → idempotent
+                return Ok(()); // still alive → idempotent
             }
         }
-        use std::os::windows::process::CommandExt;
         let dir = match Self::bundle_dir() {
             Some(d) => d,
-            None => return Err("winws bundle dizini çözülemedi".into()),
+            None => return Err("could not resolve the winws bundle directory".into()),
         };
         let exe = dir.join("winws.exe");
         if !exe.exists() {
-            return Err(format!("winws.exe bulunamadı ({}) — bundle eksik", exe.display()));
+            return Err(format!("winws.exe not found ({}) — bundle is missing", exe.display()));
         }
-        Self::kill_all();
-        clear_stale_windivert();
+
+        // SPEED (2026-08-16). This used to run `kill_all()` (a taskkill spawn) AND
+        // `clear_stale_windivert()` (up to 3 service names × sc config + sc stop + 5×500ms poll +
+        // sc delete) on EVERY start, before even attempting to launch. That is the bulk of the
+        // 3.9s cold start the user was waiting through, and it was pure insurance: on a healthy
+        // machine every one of those calls is a no-op that still costs its full poll budget.
+        //
+        // Both are now failure-path only. The happy path does one cheap in-process check (toolhelp
+        // snapshot, sub-millisecond) and spawns. If winws then dies immediately — the actual symptom
+        // of a stale/conflicting WinDivert registration — the full cleanup runs and we retry. Same
+        // recovery, paid only when it is needed.
+        if crate::proc::image_running("winws.exe") {
+            Self::kill_all();
+        }
+
         let excl = self.excl.clone();
         let strat = strategy.clone();
         let hl = hostlist.to_vec();
-        let spawn = || {
-            std::process::Command::new(&exe)
-                .args(Self::args(&dir, &excl, &strat, &hl))
-                .creation_flags(0x0800_0000)
-                .spawn()
-        };
-        let mut child = spawn().map_err(|e| format!("winws başlatılamadı: {e}"))?;
+        let argv = Self::args(&dir, &excl, &strat, &hl);
+        crate::elog::info("engine", "winws_args", &format!("winws {}", argv.join(" ")));
+
+        let mut child = Self::spawn_winws(&exe, &argv).map_err(|e| format!("winws failed to start: {e}"))?;
         self.assign_to_job(&child);
-        std::thread::sleep(std::time::Duration::from_millis(700));
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            eprintln!("[evorift][winws] anında çıktı (WinDivert çakışması olası) — temizleyip yeniden deniyorum");
+
+        // Poll instead of sleeping a flat 700ms. A healthy winws is alive after ~30ms, so the old
+        // fixed sleep spent ~670ms per start proving something already true.
+        if let Some(code) = Self::settle(&mut child, std::time::Duration::from_millis(700)) {
+            crate::elog::warn(
+                "engine",
+                "winws_instant_exit",
+                &format!(
+                    "winws exited immediately (code {code}) — likely a stale/conflicting WinDivert \
+                     registration; clearing the driver and retrying"
+                ),
+            );
             clear_stale_windivert();
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            child = spawn().map_err(|e| format!("winws yeniden başlatılamadı: {e}"))?;
-            self.assign_to_job(&child);
+            // NO `--debug=1` on the retry.
+            //
+            // It was added here to explain WHY winws refused to start (winws is silent on a healthy
+            // run, so the captured stdio was empty for the one case that mattered). It was removed
+            // again on 2026-08-16: winws's debug output is per-connection and can print matched
+            // hostnames, and `winws.log` is captured to disk and swept into the support bundle. A
+            // privacy rule that says no requested domain is ever written in plaintext cannot have an
+            // exception that fires exactly when something is going wrong.
+            //
+            // What is kept instead costs nothing and leaks nothing: the exit code, and our own
+            // argument line (which carries the hostlist FILE PATH, never its contents).
+            let mut retry =
+                Self::spawn_winws(&exe, &argv).map_err(|e| format!("winws failed to restart: {e}"))?;
+            self.assign_to_job(&retry);
+            if let Some(code2) = Self::settle(&mut retry, std::time::Duration::from_millis(1500)) {
+                // Do NOT keep a dead child and report success — that is the silent-success bug.
+                let tail = Self::log_tail();
+                return Err(format!(
+                    "winws exited immediately twice (code {code2}). Last engine output: {tail}"
+                ));
+            }
+            child = retry;
         }
         self.child = Some(child);
         Ok(())
@@ -775,10 +1180,20 @@ impl BypassEngine for WinwsEngine {
             let _ = c.kill();
             let _ = c.wait();
         }
-        Self::kill_all();
+        if crate::proc::image_running("winws.exe") {
+            Self::kill_all();
+        }
     }
+    /// MEASURED, not remembered (CLAUDE.md rule 10). This used to return `self.child.is_some()`,
+    /// which stays true forever after winws dies — the handle is only cleared by an explicit stop.
+    /// So a crashed engine kept reporting "running" until the 5s watchdog happened to notice.
     fn is_running(&self) -> bool {
-        self.child.is_some()
+        match &self.child {
+            // try_wait needs &mut; the interior state we need is just "has it exited", which the
+            // OS can answer from the handle without mutating our side. Ok(None) = still alive.
+            Some(c) => crate::proc::pid_alive(c.id()),
+            None => false,
+        }
     }
     fn exclusion_differs(&self, excl: &ExclusionPorts) -> bool {
         &self.excl != excl
@@ -877,6 +1292,7 @@ mod tests {
             wf_udp: "443",
             fake_quic: "",
             hostlist_only: false,
+            fallback: "",
         };
         let a = s.tls_profile_args();
         assert!(a.iter().any(|x| x == "--dpi-desync-ttl=4"));

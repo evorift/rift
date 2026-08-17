@@ -992,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "evorift"
-version = "0.1.7"
+version = "0.3.1"
 dependencies = [
  "getrandom 0.2.17",
  "interprocess",

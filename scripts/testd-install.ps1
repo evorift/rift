@@ -56,7 +56,8 @@ param(
     [string]$BinarySource,
     [string]$SandboxRoot = "C:\evorift-test",
     [int]$DeadmanSecs = 120,
-    [switch]$RotateToken
+    [switch]$RotateToken,
+    [switch]$StrictAllowlist
 )
 
 $ErrorActionPreference = 'Stop'
@@ -321,18 +322,47 @@ Write-Step "Writing the config"
 # state_dir deliberately sits outside sandbox_root: /pull can only ever serve paths under the
 # sandbox, so putting the token and audit log here makes them structurally unfetchable. The
 # agent refuses to start if this is violated.
+# Derive the controller's /24 so a DHCP change on EITHER machine does not break the pairing.
+#
+# Both machines got new leases on the same day once, which simultaneously invalidated the bind
+# address, the allowlist entry and the address the controller was dialling. The source filter was
+# never the security boundary -- the bearer token is -- so widening it to the LAN buys robustness
+# at negligible cost. Use -StrictAllowlist for a single-address filter.
+if ($StrictAllowlist) {
+    $allowlist = @($ControllerIp)
+    Write-Info "allowlist pinned to $ControllerIp exactly (-StrictAllowlist)"
+} else {
+    $o = $ControllerIp.Split('.')
+    $allowlist = @("$($o[0]).$($o[1]).$($o[2]).0/24")
+    Write-Info "allowlist $($allowlist[0]) - survives a DHCP change on the controller"
+}
+
+# bind_ip "auto" means "whichever local address routes toward the controller", re-checked every
+# 30s by the agent. A literal address here would go stale the next time this laptop's lease moves.
 $config = [ordered]@{
-    bind_ip                  = $BindIp
+    bind_ip                  = "auto"
     port                     = $Port
-    allowlist                = @($ControllerIp)
+    allowlist                = $allowlist
     sandbox_root             = $SandboxRoot
     state_dir                = $StateDir
     deadman_secs             = $DeadmanSecs
     max_upload_bytes         = 536870912
     default_job_timeout_secs = 300
 }
-$config | ConvertTo-Json -Depth 4 | Out-File -FilePath $ConfigPath -Encoding utf8
-Write-Ok "config at $ConfigPath"
+# Write UTF-8 WITHOUT a byte-order mark.
+#
+# `Out-File -Encoding utf8` in Windows PowerShell 5.1 ALWAYS prepends a BOM (EF BB BF), and a
+# BOM makes this file unparseable as JSON -- the agent then dies before it can log why, and the
+# service sits there reporting "Running" with nothing listening. That exact failure cost a trip
+# to the laptop. .NET's UTF8Encoding($false) is the only reliable way to suppress it here.
+[System.IO.File]::WriteAllText($ConfigPath, ($config | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding($false)))
+
+# Verify, rather than trust: read the first bytes back and refuse to continue if a BOM appeared.
+$configBytes = [System.IO.File]::ReadAllBytes($ConfigPath)
+if ($configBytes.Length -ge 3 -and $configBytes[0] -eq 0xEF -and $configBytes[1] -eq 0xBB -and $configBytes[2] -eq 0xBF) {
+    throw "The config at $ConfigPath was written with a UTF-8 BOM, which the agent cannot parse. This is a bug in the installer -- report it."
+}
+Write-Ok "config at $ConfigPath (UTF-8, no BOM - verified)"
 Write-Info "sandbox root: $SandboxRoot   deadman: ${DeadmanSecs}s"
 
 # --- 4: service --------------------------------------------------------------------------------
@@ -342,17 +372,51 @@ Write-Step "Registering the Windows service"
 if ($existing) {
     Write-Info "service already exists -- deleting and recreating so binPath/config changes take effect"
     sc.exe delete $ServiceName | Out-Null
-    Start-Sleep -Seconds 2
+    # A delete does not complete while a handle is still open (DELETE_PENDING). Creating the
+    # service again during that window fails with "marked for deletion", so wait it out.
+    $gone = $false
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 500
+        if (-not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) { $gone = $true; break }
+    }
+    if (-not $gone) {
+        throw "The existing '$ServiceName' service is still marked for deletion. Close Services.msc and Task Manager, then re-run."
+    }
 }
 
-# `binPath=` needs the config as an argument, and the space in "Program Files" means the exe
-# path itself must be quoted inside the value. sc.exe also requires the space AFTER the `=`.
+# The service command line: the exe, then the config path. Both are quoted because
+# "C:\Program Files\..." contains a space.
 $binPath = '"{0}" "{1}"' -f $ExePath, $ConfigPath
-sc.exe create $ServiceName binPath= $binPath start= auto obj= LocalSystem DisplayName= "evorift remote test agent" | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "sc.exe create failed with exit code $LASTEXITCODE" }
-Write-Ok "service $ServiceName created (LocalSystem, auto-start)"
 
-sc.exe description $ServiceName "Remote test agent for evorift. Runs sandbox-confined test commands for one allowlisted controller and self-recovers if the controller goes silent." | Out-Null
+# New-Service, NOT `sc.exe create`.
+#
+# Windows PowerShell 5.1 rewrites arguments on their way to a native .exe, and a single
+# argument that itself contains double quotes and spaces -- exactly what binPath= needs -- comes
+# out mangled. sc.exe then rejects it with exit code 1639 (ERROR_INVALID_COMMAND_LINE). This was
+# hit for real during a laptop install. New-Service hands the string to the service-control API
+# directly, so there is no command line to mangle.
+try {
+    New-Service -Name $ServiceName `
+                -BinaryPathName $binPath `
+                -DisplayName "evorift remote test agent" `
+                -StartupType Automatic `
+                -Description "Remote test agent for evorift. Runs sandbox-confined test commands for one allowlisted controller and self-recovers if the controller goes silent." `
+                -ErrorAction Stop | Out-Null
+} catch {
+    throw "Could not register the '$ServiceName' service: $($_.Exception.Message)"
+}
+
+# Read the registered path back rather than trusting that it was stored as intended -- this is
+# the exact field that silently broke before.
+$registered = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName" -Name ImagePath -ErrorAction SilentlyContinue).ImagePath
+if (-not $registered) {
+    throw "The service was created but its ImagePath is empty. Remove it with 'sc.exe delete $ServiceName' and re-run."
+}
+if ($registered -notlike "*evorift-testd.exe*") {
+    throw "The service ImagePath looks wrong: $registered"
+}
+Write-Ok "service $ServiceName created (LocalSystem, auto-start)"
+Write-Info "ImagePath: $registered"
 
 # Auto-restart matters more here than usual: if the agent dies while the software under test has
 # the network down, nobody can reach the laptop to restart it by hand.
@@ -371,18 +435,23 @@ if ($old) {
     Write-Info "removed the previous rule"
 }
 
+# Scoped by remote address + port + program, but deliberately NOT by local address.
+#
+# Pinning -LocalAddress to the address detected at install time silently blocked everything the
+# moment DHCP moved this laptop: the agent rebound correctly and the rule then pointed at an
+# address the machine no longer had. Remote address, port and program are the three that matter.
+$fwRemote = if ($StrictAllowlist) { $ControllerIp } else { $allowlist[0] }
 New-NetFirewallRule `
     -DisplayName $FwRuleName `
     -Direction Inbound `
     -Action Allow `
     -Protocol TCP `
     -LocalPort $Port `
-    -LocalAddress $BindIp `
-    -RemoteAddress $ControllerIp `
+    -RemoteAddress $fwRemote `
     -Program $ExePath `
     -Profile Any `
     -Description "evorift-testd: inbound from the controller only." | Out-Null
-Write-Ok "inbound TCP $Port allowed from $ControllerIp only (to $BindIp, program-scoped)"
+Write-Ok "inbound TCP $Port allowed from $fwRemote only (program-scoped, any local address)"
 
 # --- 6: start and verify -------------------------------------------------------------------------
 

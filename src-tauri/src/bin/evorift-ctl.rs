@@ -21,14 +21,104 @@ fn main() {
     let arg = std::env::args().nth(1).unwrap_or_else(|| "status".to_string());
     match arg.as_str() {
         "on" => {
-            let domains: Vec<String> = CORE.iter().map(|s| s.to_string()).collect();
-            match client::command(Command::SetHostlist { domains }) {
-                Ok(_) => println!("hostlist: {} domain gonderildi", CORE.len()),
-                Err(e) => eprintln!("hostlist HATA: {e}"),
-            }
+            // No SetHostlist here any more. The protection MODE owns its scope now (service.rs
+            // plan_for_mode), so pushing a hostlist first would either be redundant or, worse,
+            // silently widen/narrow what the mode says it covers.
             match client::command_status(Command::Start) {
-                Ok(s) => println!("START OK running={} strategy={} dns={}", s.running, s.strategy, s.dns),
+                Ok(s) => println!(
+                    "START OK running={} mode={} strategy={} dns={} verify={}",
+                    s.running, s.mode, s.strategy, s.dns, s.verify
+                ),
                 Err(e) => { eprintln!("START HATA: {e}"); std::process::exit(1); }
+            }
+        }
+        // Measure the strategy ladder on this line and deploy the winner. Takes up to a few minutes
+        // on a badly blocked line; prints the whole score table so the choice is inspectable.
+        "tune" => {
+            let targets: Vec<String> = std::env::args().skip(2).collect();
+            println!("olculuyor (bu dakikalar surebilir)...");
+            match client::command_data(Command::Tune { targets }) {
+                Ok(json) => match serde_json::from_str::<serde_json::Value>(&json) {
+                    Ok(v) => {
+                        println!(
+                            "TUNE -> secilen={} network={} gave_up={}",
+                            v["strategy"].as_str().unwrap_or("?"),
+                            v["network"].as_str().unwrap_or("?"),
+                            v["gave_up"].as_bool().unwrap_or(false)
+                        );
+                        if let Some(rows) = v["rows"].as_array() {
+                            println!("  {:<20} {:>7} {:>7} {:>8}", "strategy", "opened", "broke", "avg_ms");
+                            for r in rows {
+                                println!(
+                                    "  {:<20} {:>3}/{:<3} {:>7} {:>8}",
+                                    r["strategy"].as_str().unwrap_or("?"),
+                                    r["opened"].as_u64().unwrap_or(0),
+                                    r["total"].as_u64().unwrap_or(0),
+                                    r["broke"].as_u64().unwrap_or(0),
+                                    r["avg_ms"].as_u64().unwrap_or(0),
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => println!("TUNE ham cikti ({e}): {json}"),
+                },
+                Err(e) => { eprintln!("TUNE HATA: {e}"); std::process::exit(1); }
+            }
+        }
+        // Structured engine events — the log the UI shows. Useful headless when something failed
+        // and the only other evidence would be a file on a machine you are not sitting at.
+        "events" => {
+            let since: u64 = std::env::args().nth(2).and_then(|v| v.parse().ok()).unwrap_or(0);
+            match client::command_data(Command::Events { since }) {
+                Ok(json) => match serde_json::from_str::<serde_json::Value>(&json) {
+                    Ok(v) => {
+                        for e in v["events"].as_array().into_iter().flatten() {
+                            println!(
+                                "[{}] {:<5} {}/{}: {}",
+                                e["at"].as_str().unwrap_or(""),
+                                e["level"].as_str().unwrap_or(""),
+                                e["module"].as_str().unwrap_or(""),
+                                e["code"].as_str().unwrap_or(""),
+                                e["message"].as_str().unwrap_or("")
+                            );
+                        }
+                        println!("watermark={}", v["watermark"].as_u64().unwrap_or(0));
+                    }
+                    Err(e) => println!("EVENTS ham cikti ({e}): {json}"),
+                },
+                Err(e) => { eprintln!("EVENTS HATA: {e}"); std::process::exit(1); }
+            }
+        }
+        // Delete everything stored locally — the headless equivalent of Settings → "Tüm verileri
+        // sil". Prints the service's own {removed, remaining} report rather than "done": a wipe
+        // that silently left files behind is exactly the failure this command exists to detect.
+        "wipe" => match client::command_data(Command::WipeLocalData) {
+            Ok(json) => match serde_json::from_str::<serde_json::Value>(&json) {
+                Ok(v) => {
+                    let list = |k: &str| {
+                        v[k].as_array()
+                            .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", "))
+                            .unwrap_or_default()
+                    };
+                    let remaining = list("remaining");
+                    println!("WIPE removed=[{}]", list("removed"));
+                    if remaining.is_empty() {
+                        println!("WIPE remaining=[] (nothing left behind)");
+                    } else {
+                        println!("WIPE remaining=[{remaining}]  <-- NOT deleted");
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => println!("WIPE ham cikti ({e}): {json}"),
+            },
+            Err(e) => { eprintln!("WIPE HATA: {e}"); std::process::exit(1); }
+        },
+        // Should protection come back on its own after a reboot?
+        "autostart" => {
+            let enable = !matches!(std::env::args().nth(2).as_deref(), Some("off" | "false" | "0"));
+            match client::command_status(Command::SetAutoStart { enable }) {
+                Ok(_) => println!("AUTOSTART -> {}", if enable { "on" } else { "off" }),
+                Err(e) => { eprintln!("AUTOSTART HATA: {e}"); std::process::exit(1); }
             }
         }
         "off" => match client::command_status(Command::Stop) {
@@ -59,6 +149,9 @@ fn main() {
         }
         // Kullanıcıya görünen koruma modu (hafif|guclu) — UI'daki kartların tam karşılığı, tek
         // atomik komut. Headless test için: canlı doğrulamada modu UI olmadan değiştirebilmek şart.
+        // NOTE: not aliased to "mode" — that verb is already taken below by the live-verification
+        // dpi/warp-split/warp-full switch, and shadowing it would have made one of the two silently
+        // unreachable (the compiler caught exactly that).
         "protmode" => {
             let mode = std::env::args().nth(2).unwrap_or_else(|| "hafif".to_string());
             match client::command_status(Command::SetProtectionMode { mode: mode.clone() }) {
@@ -206,10 +299,29 @@ fn main() {
         // verify/verify_reason DAHİL: "çalışıyor" ile "gerçekten geçiyor" farkı bu alanda; canlı
         // doğrulamada bunu görmeden durum hakkında konuşulamaz (UI'ın gördüğü alanın aynısı).
         _ => match client::command_status(Command::Status) {
-            Ok(s) => println!(
-                "STATUS running={} state={} engine={} strategy={} dns={} verify={} reason={}",
-                s.running, s.state, s.engine, s.strategy, s.dns, s.verify, s.verify_reason
-            ),
+            Ok(s) => {
+                println!(
+                    "STATUS running={} state={} mode={} strategy={} dns={} verify={} harm={} \
+                     targets={}/{} tuning={} tuned={} reason={}",
+                    s.running, s.state, s.mode, s.strategy, s.dns, s.verify, s.harm,
+                    s.targets_ok, s.targets_total, s.tuning, s.tuned_strategy, s.verify_reason
+                );
+                // Per-site detail: the whole reason a "verified" status could be a lie before was
+                // that nobody could see WHICH sites the verdict was based on.
+                for site in &s.sites {
+                    println!(
+                        "  {:<26} {:<7} {:>5}ms {}{}",
+                        site.host,
+                        if site.ok { "OK" } else { "FAIL" },
+                        site.ms,
+                        if site.control { "[control] " } else { "" },
+                        site.reason
+                    );
+                }
+                for p in &s.problems {
+                    println!("  ! [{}] {}/{}: {}", p.at, p.module, p.code, p.message);
+                }
+            }
             Err(e) => { eprintln!("STATUS HATA: {e}"); std::process::exit(1); }
         },
     }

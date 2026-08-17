@@ -8,6 +8,7 @@
   const REPO = "https://github.com/evorift/rift";
   const RELEASES = REPO + "/releases";
   const SPONSOR = "https://github.com/sponsors/evorift";
+  const VIRUSTOTAL = "https://www.virustotal.com/";
 
   let openFaq = $state(-1);
 
@@ -30,7 +31,7 @@
     { k: "warp", ico: "⤳" },
   ];
 
-  const faqs = [1, 2, 3, 4, 5];
+  const faqs = [1, 2, 3, 4, 5, 6, 7];
 </script>
 
 <svelte:head>
@@ -162,6 +163,11 @@
     <a href={SPONSOR} target="_blank" rel="noopener">♥ {t("cta.sponsor")}</a>
   </nav>
   <p class="ss">{t("foot.smartscreen")}</p>
+  <p class="ss">
+    {t("foot.verify")}
+    <a href={VIRUSTOTAL} target="_blank" rel="noopener">VirusTotal</a>.
+    {t("foot.official")} <a href={REPO} target="_blank" rel="noopener">github.com/evorift/rift</a>.
+  </p>
   <p class="made">{t("foot.made")} · © {BRAND}</p>
 </footer>
 

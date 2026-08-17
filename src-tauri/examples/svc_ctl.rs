@@ -15,7 +15,7 @@ fn main() {
     // `svc_ctl strat <id>` → yalnız stratejiyi değiştir (motor çalışırken anında yansır)
     if arg == "strat" {
         if let Some(id) = strat {
-            match client::command_status(Command::SetStrategy { id: id.clone() }) {
+            match client::command_status(Command::SetStrategy { id: id.clone(), repeats_override: None }) {
                 Ok(s) => println!("[svc_ctl] strateji={} · running={}", id, s.running),
                 Err(e) => { eprintln!("[svc_ctl] HATA: {e}"); std::process::exit(1); }
             }
@@ -29,7 +29,7 @@ fn main() {
     if arg == "start" {
         // strateji verildiyse start'tan önce uygula
         if let Some(id) = &strat {
-            let _ = client::command_status(Command::SetStrategy { id: id.clone() });
+            let _ = client::command_status(Command::SetStrategy { id: id.clone(), repeats_override: None });
             eprintln!("[svc_ctl] strateji ayarlandı: {id}");
         }
         // motor yalnız listedeki domainleri parçalar (yanlış-pozitif yok) — app.toggle ile aynı akış

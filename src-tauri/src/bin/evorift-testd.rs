@@ -27,6 +27,31 @@ fn config_path_from_args() -> PathBuf {
         .unwrap_or_else(testd::default_config_path)
 }
 
+/// Record a startup failure where a human will actually find it.
+///
+/// A service's stderr goes nowhere. When the agent failed to parse its config it died before
+/// opening the audit log, so the only evidence anywhere was "service Running, nothing
+/// listening" — which is indistinguishable from a firewall problem from the outside. This file
+/// is the breadcrumb that makes that case self-diagnosing; `scripts/check.ps1` prints it.
+fn record_startup_failure(message: &str) {
+    use std::io::Write;
+    let dir = testd::default_state_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("[testd] cannot create {} to record startup failure: {e}", dir.display());
+        return;
+    }
+    let path = dir.join("startup-error.log");
+    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut f) => {
+            let stamp = evorift_lib::testd::util::iso8601_utc(evorift_lib::testd::util::unix_secs());
+            if let Err(e) = writeln!(f, "[{stamp}] {message}") {
+                eprintln!("[testd] could not write {}: {e}", path.display());
+            }
+        }
+        Err(e) => eprintln!("[testd] could not open {}: {e}", path.display()),
+    }
+}
+
 /// Load config + token and serve. Returns only on a fatal error.
 fn serve() -> Result<(), testd::StartupError> {
     // This process runs as LocalSystem when installed as a service, which is what lets the
@@ -62,15 +87,24 @@ mod svc {
         }
     }
 
+    /// Why the service loop ended. The distinction matters to the SCM: a clean stop must report
+    /// success, a startup failure must report failure so the configured restart action fires and
+    /// `Get-Service` does not claim the agent is fine.
+    enum Ended {
+        Stopped,
+        Failed,
+    }
+
     fn run_service() -> windows_service::Result<()> {
-        let (stop_tx, stop_rx) = mpsc::channel();
+        let (stop_tx, stop_rx) = mpsc::channel::<Ended>();
+        let fail_tx = stop_tx.clone();
 
         let status_handle = service_control_handler::register(SERVICE_NAME, move |control| {
             match control {
                 ServiceControl::Stop | ServiceControl::Shutdown => {
                     // A send failure means the main thread is already gone, which is the state
                     // the sender wanted anyway.
-                    let _ = stop_tx.send(());
+                    let _ = stop_tx.send(Ended::Stopped);
                     ServiceControlHandlerResult::NoError
                 }
                 ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -94,16 +128,35 @@ mod svc {
         ))?;
 
         // The listener blocks, so it gets its own thread; this one waits for the SCM's STOP.
-        std::thread::spawn(|| {
+        std::thread::spawn(move || {
             if let Err(e) = super::serve() {
-                // The service stays "Running" from the SCM's point of view but is not serving.
-                // sc.exe's configured restart action is what recovers this; say why in the log.
-                eprintln!("[testd] FATAL: {e}");
+                // Do NOT keep reporting Running with nothing listening — that is the exact
+                // failure that made a BOM in the config file take a trip to the laptop to
+                // diagnose. Write the reason down and take the service down with a failure
+                // exit code so the SCM's restart action fires and Get-Service tells the truth.
+                let message = format!("FATAL: {e}");
+                eprintln!("[testd] {message}");
+                super::record_startup_failure(&message);
+                let _ = fail_tx.send(Ended::Failed);
             }
         });
 
-        let _ = stop_rx.recv(); // blocks until the SCM asks us to stop
-        status_handle.set_service_status(status(ServiceState::Stopped, ServiceControlAccept::empty()))?;
+        // Blocks until the SCM asks us to stop, or the listener gives up.
+        let ended = stop_rx.recv().unwrap_or(Ended::Stopped);
+        let exit_code = match ended {
+            Ended::Stopped => ServiceExitCode::Win32(0),
+            // A service-specific non-zero code marks the service as failed.
+            Ended::Failed => ServiceExitCode::ServiceSpecific(1),
+        };
+        status_handle.set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::Stopped,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code,
+            checkpoint: 0,
+            wait_hint: Duration::default(),
+            process_id: None,
+        })?;
         Ok(())
     }
 

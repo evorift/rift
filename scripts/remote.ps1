@@ -72,7 +72,7 @@ param(
     [int]$Port = 8765,
     [string]$Token = $env:EVORIFT_TESTD_TOKEN,
     [Parameter(Mandatory = $true)]
-    [ValidateSet("health", "push", "run", "job", "pull", "recover", "cycle")]
+    [ValidateSet("health", "push", "run", "job", "pull", "recover", "cycle", "engine")]
     [string]$Action,
     [string]$Path,
     [string]$RemotePath,
@@ -178,6 +178,36 @@ function Send-AgentFile {
     return $result
 }
 
+<#
+    Push a whole local directory into the sandbox, preserving its layout.
+
+    The engine bundle is ten files across three folders and the agent takes one file per request
+    by design (no archive handling in the trusted path). Pushing them individually keeps that
+    boundary intact and still checksums every file.
+#>
+function Send-AgentTree {
+    param(
+        [Parameter(Mandatory = $true)][string]$LocalDir,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [int]$RetrySeconds = 60
+    )
+    if (-not (Test-Path $LocalDir)) { throw "Local directory not found: $LocalDir" }
+    # NOT $base. PowerShell variable names are case-insensitive AND functions can read their
+    # caller's locals, so a local `$base` here silently shadows the script-level `$Base` (the
+    # agent URL) inside every function this one calls -- Invoke-Agent then tries to POST to a
+    # local directory path. Cost one failed run to find.
+    $localBase = (Resolve-Path $LocalDir).Path.TrimEnd('\')
+    $files = Get-ChildItem -LiteralPath $localBase -Recurse -File
+    $sent = 0
+    foreach ($f in $files) {
+        $rel = $f.FullName.Substring($localBase.Length).TrimStart('\') -replace '\\', '/'
+        Send-AgentFile -LocalPath $f.FullName -Destination "$Destination/$rel" -RetrySeconds $RetrySeconds | Out-Null
+        $sent++
+    }
+    Write-Ok "pushed $sent file(s) into $Destination/"
+    return $sent
+}
+
 function Start-AgentJob {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptPath,
@@ -208,6 +238,18 @@ function Wait-AgentJob {
     )
     $deadline = (Get-Date).AddSeconds($WaitSeconds)
     while ($true) {
+        # Heartbeat FIRST, every poll.
+        #
+        # Only /health resets the deadman -- polling /job/<id> does not. A capture job can easily
+        # run longer than the 120s deadman window, so without this the agent would conclude the
+        # controller had vanished and recover the laptop mid-test, while the controller was in
+        # fact talking to it the whole time. That would fire the deadman on every single run and
+        # make the "results are trustworthy" verdict meaningless.
+        #
+        # Deliberately swallowed: during the outage this SHOULD fail, and that is precisely when
+        # the deadman is supposed to fire. A failed heartbeat is data, not an error.
+        try { Get-Health | Out-Null } catch { }
+
         try {
             $status = Invoke-Agent -Endpoint "/job/${Id}" -TimeoutSec 15
             if ($status.state -ne 'running') {
@@ -261,7 +303,14 @@ function Receive-AgentTree {
     $listing = Invoke-Agent -Endpoint "/job/${jobId}?tail=262144"
     $files = $listing.stdout_tail -split "`r?`n" | Where-Object { $_.Trim() -ne '' }
     $pulled = @()
+    $since = 0
     foreach ($f in $files) {
+        # Same reason as in Wait-AgentJob: a capture bundle can be many files, and /pull does not
+        # reset the deadman. Heartbeat periodically so a long download is not mistaken for a dead
+        # controller. Every 10 files is far inside the 120s window at LAN speeds.
+        $since++
+        if ($since -ge 10) { $since = 0; try { Get-Health | Out-Null } catch { } }
+
         $rel = $f.Trim()
         $dest = Join-Path $LocalDir ($rel -replace '/', '\')
         try {
@@ -320,6 +369,106 @@ switch ($Action) {
         else { Write-Ok "all recovery steps reported success" }
     }
 
+    'engine' {
+        # THE REAL TEST: push evorift's engine and actually turn protection on.
+        $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        $repoRoot = Split-Path -Parent $PSScriptRoot
+        if (-not $OutDir) { $OutDir = Join-Path $repoRoot "docs\captures\engine-$stamp" }
+        New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+
+        Write-Step "0. Baseline"
+        $before = Get-Health -RetrySeconds 30
+        $firesBefore = [int]$before.deadman.fires
+        Write-Ok "agent up, deadman fires so far: $firesBefore"
+
+        Write-Step "1. Pushing the engine bundle"
+        $rel = Join-Path $repoRoot "src-tauri\target\release"
+        foreach ($need in @("evorift-svc.exe", "evorift-ctl.exe")) {
+            $p = Join-Path $rel $need
+            if (-not (Test-Path $p)) {
+                throw ("$need not found at $p. Build it first:`n" +
+                       "    cargo build --release --manifest-path src-tauri/Cargo.toml")
+            }
+            Send-AgentFile -LocalPath $p -Destination "engine/$need" -RetrySeconds 60 | Out-Null
+        }
+        # winws + WinDivert must sit in engine\winws\, because WinwsEngine::bundle_dir() looks
+        # for <exe dir>\winws -- see engine.rs.
+        $winwsSrc = Join-Path $repoRoot "src-tauri\resources\winws"
+        Send-AgentTree -LocalDir $winwsSrc -Destination "engine/winws" -RetrySeconds 60 | Out-Null
+
+        Write-Step "2. Pushing the test scripts"
+        Send-AgentFile -LocalPath (Join-Path $repoRoot "scripts\capture-state.ps1") `
+                       -Destination "scripts/capture-state.ps1" -RetrySeconds 30 | Out-Null
+        Send-AgentFile -LocalPath (Join-Path $repoRoot "scripts\run-engine-test.ps1") `
+                       -Destination "scripts/run-engine-test.ps1" -RetrySeconds 30 | Out-Null
+
+        $listPs1 = Join-Path $env:TEMP "testd-list-files.ps1"
+        @'
+param([Parameter(Mandatory=$true)][string]$Dir)
+$root = (Get-Location).Path
+if ($root.StartsWith('\\?\')) { $root = $root.Substring(4) }
+$root = $root.TrimEnd('\')
+$rel = ($Dir -replace '/', '\').Trim('\')
+$target = "$root\$rel"
+if (-not (Test-Path -LiteralPath $target)) { Write-Error "no such directory: $target"; exit 1 }
+Get-ChildItem -LiteralPath $target -Recurse -File | ForEach-Object {
+    $_.FullName.Substring($root.Length).TrimStart('\') -replace '\\', '/'
+}
+exit 0
+'@ | Out-File -FilePath $listPs1 -Encoding utf8
+        Send-AgentFile -LocalPath $listPs1 -Destination "scripts/list-files.ps1" -RetrySeconds 30 | Out-Null
+
+        Write-Step "3. Running the engine test on the laptop"
+        Write-Info "the laptop starts evorift, captures itself, and stops it again -- all locally"
+        Write-Info "the link may drop while protection is on; that is the point, and it is expected"
+        $jobId = Start-AgentJob -ScriptPath "scripts/run-engine-test.ps1" `
+                                -ScriptArgs @("-HoldSeconds", "$TimeoutSecs") `
+                                -JobTimeout 900 -RetrySeconds 60
+        $job = Wait-AgentJob -Id $jobId -WaitSeconds 1200
+
+        Write-Step "4. Engine test output"
+        $full = Invoke-Agent -Endpoint "/job/$jobId`?tail=200000" -RetrySeconds 120
+        if ($full.stdout_tail) { $full.stdout_tail -split "`r?`n" | ForEach-Object { Write-Host "  $_" } }
+        if ($full.stderr_tail) {
+            Write-Step "stderr"
+            $full.stderr_tail -split "`r?`n" | Select-Object -First 40 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
+        }
+
+        Write-Step "5. Pulling everything back"
+        try { Receive-AgentFile -RemoteRelPath "engine-test-result.json" `
+                                -Destination (Join-Path $OutDir "engine-test-result.json") -RetrySeconds 120 }
+        catch { Write-Bad "no engine-test-result.json: $($_.Exception.Message)" }
+        $pulled = Receive-AgentTree -RemoteDir "docs/captures" -LocalDir $OutDir -RetrySeconds 300
+        Write-Ok "pulled $($pulled.Count) capture file(s)"
+        $recovered = Receive-AgentTree -RemoteDir "recovery" -LocalDir $OutDir -RetrySeconds 120
+
+        Write-Step "6. Verdict"
+        $after = Get-Health -RetrySeconds 600
+        $delta = [int]$after.deadman.fires - $firesBefore
+
+        $resultFile = Join-Path $OutDir "engine-test-result.json"
+        $result = $null
+        if (Test-Path $resultFile) { $result = Get-Content $resultFile -Raw | ConvertFrom-Json }
+
+        Write-Host ""
+        if ($result) {
+            if ($result.winws_seen) { Write-Ok "winws RAN - the 'during' capture reflects an active bypass" }
+            else { Write-Bad "winws never started - the 'during' capture shows NO bypass; check the output above" }
+            if ($result.ok) { Write-Ok "the network recovered after the engine stopped" }
+            else { Write-Bad "the network did NOT recover cleanly after stopping - this is the reported bug" }
+        } else {
+            Write-Bad "no result file came back - read the job output above"
+        }
+        if ($delta -gt 0) {
+            Write-Bad "the deadman fired $delta time(s) during this run - the laptop rescued itself mid-test"
+            Write-Info "that means the link died and stayed dead; the captures may be truncated"
+        } else {
+            Write-Ok "the deadman did not fire"
+        }
+        Write-Host ""
+        Write-Host "Artefacts: $OutDir" -ForegroundColor Cyan
+    }
+
     'cycle' {
         $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
         if (-not $OutDir) {
@@ -344,10 +493,22 @@ switch ($Action) {
         @'
 # Emit every file under a sandbox-relative directory, one sandbox-relative path per line.
 param([Parameter(Mandatory=$true)][string]$Dir)
+
+# The agent's working directory is the CANONICAL sandbox root, which on Windows is a verbatim
+# path: \\?\C:\evorift-test. Verbatim paths switch off ALL path normalization, which breaks
+# PowerShell in two ways that both surface as "the directory does not exist":
+#   * a forward slash is never translated, so 'docs/captures' cannot resolve;
+#   * Join-Path fails outright ("the value of argument drive is null").
+# So strip the prefix and build the path by hand, with backslashes.
 $root = (Get-Location).Path
-$target = Join-Path $root $Dir
-if (-not (Test-Path $target)) { Write-Error "no such directory: $Dir"; exit 1 }
-Get-ChildItem -Path $target -Recurse -File | ForEach-Object {
+if ($root.StartsWith('\\?\')) { $root = $root.Substring(4) }
+$root = $root.TrimEnd('\')
+
+$rel = ($Dir -replace '/', '\').Trim('\')
+$target = "$root\$rel"
+
+if (-not (Test-Path -LiteralPath $target)) { Write-Error "no such directory: $target"; exit 1 }
+Get-ChildItem -LiteralPath $target -Recurse -File | ForEach-Object {
     $_.FullName.Substring($root.Length).TrimStart('\') -replace '\\', '/'
 }
 exit 0
@@ -389,11 +550,14 @@ exit 0
         if ($afterJob.exit_code -ne 0) { Write-Bad "the 'after' capture exited $($afterJob.exit_code)" }
 
         Write-Step "6. Pulling captures back"
-        $pulled = Receive-AgentTree -RemoteDir "docs/captures" -LocalDir (Join-Path $OutDir "captures") -RetrySeconds 300
+        # LocalDir is $OutDir, not a subfolder: the returned paths are already sandbox-relative
+        # ("docs/captures/<run>/<file>"), so the artefact folder mirrors the sandbox layout.
+        # Passing a subfolder produced captures\docs\captures\... and recovery\recovery\...
+        $pulled = Receive-AgentTree -RemoteDir "docs/captures" -LocalDir $OutDir -RetrySeconds 300
         Write-Ok "pulled $($pulled.Count) capture file(s)"
 
         # Recovery reports, if the deadman wrote any during the run.
-        $recovered = Receive-AgentTree -RemoteDir "recovery" -LocalDir (Join-Path $OutDir "recovery") -RetrySeconds 120
+        $recovered = Receive-AgentTree -RemoteDir "recovery" -LocalDir $OutDir -RetrySeconds 120
         if ($recovered.Count -gt 0) { Write-Info "pulled $($recovered.Count) recovery report(s)" }
 
         Write-Step "7. Deadman check"

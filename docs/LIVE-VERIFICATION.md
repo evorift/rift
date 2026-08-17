@@ -518,3 +518,55 @@ a verdict.
   baseline is for.
 - "Worked for me" is a single ISP. Not "solved" until confirmed on a different ISP (V10.2).
 - Unexpected success is also suspect: the block might have lifted on its own — rule that out first.
+
+---
+
+## 2026-08-17 — 0.3.1 measurement pass: ATTEMPTED, NOT COMPLETED
+
+**Nothing was measured. No timing in this section — because there is none to report.**
+
+### What was asked for
+Three timings on the test laptop, three runs each from a clean state (first install / second launch
+/ network change), plus four verifications (no domain in logs after a failed apply and a forced
+crash; the `hostlist.txt` ACL holding against a standard user; wipe leaving nothing; and the real
+cost of the tuner's early exit).
+
+### What was prepared and is ready to run
+- `evorift 0.3.1` built and staged at `build-031/` (installer 12,332,683 bytes; UI and service both
+  stamped 0.3.1; the staged service binary's SHA256 matches the freshly built one).
+- `evorift-ctl wipe` added, so "Tüm verileri sil" can be exercised headlessly. It prints the
+  service's own `{removed, remaining}` report and **exits 1 when anything survives** — a wipe that
+  quietly leaves files behind is precisely what that check exists to catch.
+- `scratchpad/measure-030.ps1` — the full campaign. Note the one design decision that matters: the
+  "Korumalı" moment is NOT taken from the service's own status string. The script waits for
+  `verify=verified` and then independently confirms it with its own TLS handshake to a blocked
+  target. A timing read off a status field would be measuring the exact lie this engine was
+  rewritten to stop telling.
+
+### Why it did not run
+The `testd` agent was reachable and authenticating at the start of the session (`/health` OK,
+uptime ~12.6 h, bearer token from `D:\testd.token` accepted). `POST /push` then failed repeatedly —
+including for a 4 KB file, so not a size or `max_upload_bytes` issue. After several failed uploads
+the agent stopped answering entirely and port 8765 closed. It did not return within five minutes,
+and a sweep of every host on 192.168.1.0/24 found no listener on 8765 anywhere, which also rules
+out the DHCP-move case the agent's own address-watcher is built for.
+
+Conclusion: the laptop is powered off, asleep, or off the network. This cannot be recovered from
+the controller side — `/recover` needs the agent that is gone.
+
+### One real bug found, and fixed
+`testd/server.rs` incremented the live-connection counter before spawning the handler thread, but
+only decremented it *inside* that thread. A failed spawn therefore leaked one of only
+`MAX_CONNECTIONS = 8` slots, permanently. Eight of those and the agent refuses every connection for
+the rest of its life — including `/health`, which is what the deadman switch watches, so the
+recovery mechanism would be locked out by the same exhaustion it exists to survive. Fixed; the slot
+is now released on the error path.
+
+Related, not yet changed and worth deciding on: 8 slots × a 120 s socket timeout means a handful of
+stalled uploads can lock the agent out for two minutes. That is what the failed pushes in this
+session looked like from the outside, and it is the reason a flaky link degrades into an apparently
+dead agent rather than a slow one.
+
+### To complete this pass
+Power on the laptop and confirm `http://<ip>:8765/health` answers. Everything else is staged; the
+run is one command from the controller.

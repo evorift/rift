@@ -85,9 +85,35 @@ pub enum Command {
     TunnelStatus,
     /// Derived health signal (item 11.2): returns `HealthSignal` as `Response::Data(JSON)`.
     Health,
+
+    // ---- Added 2026-08-16 --------------------------------------------------------------------
+    /// Measure the candidate ladder on THIS line and persist the winner (see `tuner`). Blocking;
+    /// pauses the live engine for the duration and restores it afterwards.
+    /// `targets` empty → the mode's own target set. → `Response::Data(JSON: tuner::Tuning)`.
+    Tune { targets: Vec<String> },
+    /// Structured engine events newer than `since` — how errors reach the UI at all.
+    /// → `Response::Data(JSON: { watermark, events })`.
+    Events { since: u64 },
+    /// Should protection come back up by itself when Windows starts? Persisted across reboots.
+    /// This is the setting whose ABSENCE meant a reboot always came up unprotected.
+    SetAutoStart { enable: bool },
+    /// Domains the user added to the wide (Güçlü) hostlist, on top of the shipped set.
+    /// Replaces the old `SetHostlist`, which the UI had stubbed out to a no-op.
+    SetExtraDomains { domains: Vec<String> },
+    /// Delete everything stored locally: the encrypted store, the measurement, the generated
+    /// hostlist and the logs. → `Response::Data(JSON: { removed: [..], remaining: [..] })`, so the
+    /// UI can state what actually went rather than assuming it worked.
+    WipeLocalData,
 }
 
 /// Servis → istemci yanıtları.
+///
+/// `Status` is much larger than the other variants now that `EngineStatus` carries the per-site
+/// probe results and the recent problem list. Boxing it would silence clippy at the cost of an
+/// allocation per response and a change at every construction and match site — for a value that is
+/// built at most a few times a second on an IPC path, not in any hot loop. Not worth it; the size
+/// is deliberate.
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
@@ -120,6 +146,57 @@ pub struct EngineStatus {
     /// `verify == "broken"` iken kullanıcıya gösterilecek neden; aksi halde boş.
     #[serde(default)]
     pub verify_reason: String,
+
+    // ---- Added 2026-08-16: everything the UI needed in order to stop guessing ----------------
+    /// Active user-facing mode ("hafif" | "guclu"). The UI used to keep this only in its own
+    /// localStorage, so a service restart left the two disagreeing about what was running.
+    #[serde(default)]
+    pub mode: String,
+    /// The engine is BREAKING ordinary traffic (control sites failed). Distinct from `verify ==
+    /// "broken"`, which only means the targets did not open. Harm is the more serious condition and
+    /// must never render as "protected", nor as a mere "couldn't verify".
+    #[serde(default)]
+    pub harm: bool,
+    /// Per-line measurement state: "" (never run) | "tuning" | "tuned" | "gave_up".
+    #[serde(default)]
+    pub tuning: String,
+    /// Which candidate the measurement is on, and how many it expects to try. The UI shows this as
+    /// real progress; a 20-second wait with no indication of movement reads as a frozen app.
+    #[serde(default)]
+    pub tuning_step: u32,
+    #[serde(default)]
+    pub tuning_total: u32,
+    /// The chain the measurement chose for this line ("off" = measured, best answer is to touch
+    /// nothing). Shown so the choice is inspectable instead of magic.
+    #[serde(default)]
+    pub tuned_strategy: String,
+    /// How many of the mode's target sites actually opened, out of how many were probed.
+    #[serde(default)]
+    pub targets_ok: u32,
+    #[serde(default)]
+    pub targets_total: u32,
+    /// Per-site probe results — what the UI shows instead of a hardcoded "Discord, Roblox" list.
+    #[serde(default)]
+    pub sites: Vec<SiteStatus>,
+    /// Newest engine problems (warnings/errors), so a failure is visible in the UI without the
+    /// user having to open a log file. Empty when nothing is wrong.
+    #[serde(default)]
+    pub problems: Vec<crate::elog::Event>,
+}
+
+/// One probed site, as shown in the UI's coverage list.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct SiteStatus {
+    pub host: String,
+    pub ok: bool,
+    /// Handshake time in ms (0 when it failed).
+    pub ms: u32,
+    /// True for the "must keep working" control set, false for sites we are trying to open.
+    /// The UI labels them differently: a failing control site is damage, a failing target is a
+    /// block we have not beaten yet.
+    pub control: bool,
+    /// Failure reason, empty when ok.
+    pub reason: String,
 }
 
 /// Canlı telemetri (docs/05 §2 — tek batch ~1 Hz). WinDivert gelene kadar simüle.
@@ -226,6 +303,20 @@ pub fn validate(cmd: &Command) -> Result<(), String> {
             }
         }
         Command::SetHostlist { domains } => valid_domains(domains),
+        Command::SetExtraDomains { domains } => {
+            if domains.len() > 200 {
+                return Err("too many custom domains (max 200)".into());
+            }
+            valid_domains(domains)
+        }
+        Command::Tune { targets } => {
+            if targets.len() > 20 {
+                return Err("too many tuning targets (max 20)".into());
+            }
+            valid_domains(targets)
+        }
+        // A cursor and a boolean carry no injectable surface; nothing to constrain beyond the type.
+        Command::Events { .. } | Command::SetAutoStart { .. } | Command::WipeLocalData => Ok(()),
         Command::SetProtectionMode { mode } => {
             if matches!(mode.as_str(), "hafif" | "guclu") {
                 Ok(())

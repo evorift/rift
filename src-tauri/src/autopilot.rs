@@ -55,35 +55,18 @@ pub struct ScoreRow {
     pub score: i64,
 }
 
-/// ISP detection (docs/07 §6 step 1) — OPT-IN for privacy. Without `consent` we NEVER send the user's IP
-/// to a third party → returns `None`. With explicit consent, a one-shot lookup of the public IP's org is
-/// attempted (best-effort). The result only PRIORITIZES presets; it never changes which presets exist.
-pub fn detect_isp(consent: bool) -> Option<String> {
-    if !consent {
-        return None;
-    }
-    lookup_isp_online()
-}
-
-/// Best-effort online ISP lookup (consent path only). Queries a public IP-info endpoint for the org name.
-/// Network-dependent → not unit-tested; returns None on any failure.
-fn lookup_isp_online() -> Option<String> {
-    let out = crate::sys::query_os(
-        "powershell",
-        &[
-            "-NoProfile",
-            "-Command",
-            "try { (Invoke-RestMethod -Uri 'https://ipinfo.io/org' -TimeoutSec 5) } catch { '' }",
-        ],
-    );
-    let s = out.trim();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s.to_string())
-    }
-}
-
+/// ISP detection USED to live here: a consent-gated lookup that asked `ipinfo.io` for the org name
+/// behind the user's public IP.
+///
+/// REMOVED 2026-08-16. It was already unreachable — every call site passed `consent: false`, so the
+/// request could never actually fire — but dead code is not the standard here. This is a
+/// censorship-circumvention tool; the presence of ANY outbound call to a third-party analytics-style
+/// endpoint in the source is enough to cost the trust of the first person who reads it, and "it
+/// never runs" is a claim a reader has to take on faith after auditing every branch.
+///
+/// Nothing was lost: the result only ever re-ordered presets, and the tuner now measures the line
+/// directly, which is strictly better evidence than a guess from an org name.
+///
 /// Map an ISP/org name to the best-matching ISP preset id (docs/03 §4.1). Pure → testable. SuperOnline is
 /// checked before Turkcell (Turkcell SuperOnline → superonline preset).
 pub fn isp_preset_id(isp: &str) -> Option<&'static str> {
@@ -316,7 +299,9 @@ pub fn best_as_profile(rows: &[ScoreRow], targets: &[String]) -> Option<crate::p
         id: "autopilot".into(),
         name: "Auto-Pilot (önerilen)".into(),
         engine: best.engine.clone(),
-        isp: detect_isp(false).unwrap_or_default(), // privacy: no auto-lookup when building the profile
+        // No ISP field: it was only ever filled from the removed online lookup, and the measured
+        // winner already describes this line better than an ISP name could.
+        isp: String::new(),
         scope: crate::profile::Scope::default(),
         dns: crate::profile::DnsCfg { enabled: true, provider: "cloudflare".into(), doh: true },
         strategy: best.strategy.clone(),
@@ -399,10 +384,10 @@ mod tests {
         assert!(Depth::Quick.early_stop() && Depth::Standard.early_stop());
     }
 
-    /// Item 6.4: ISP detection is opt-in (None without consent); ISP→preset mapping + prioritization work.
+    /// ISP→preset mapping + prioritization. (The online ISP lookup itself is gone — see the note
+    /// where it used to be; this only covers mapping a name we already have.)
     #[test]
-    fn isp_detection_opt_in_and_mapping() {
-        assert_eq!(detect_isp(false), None, "no consent → no lookup → None");
+    fn isp_mapping_and_prioritization() {
         assert_eq!(isp_preset_id("AS9121 Turk Telekom"), Some("tt"));
         assert_eq!(isp_preset_id("Turkcell Superonline"), Some("superonline"), "superonline before turkcell");
         assert_eq!(isp_preset_id("Turkcell Iletisim"), Some("turkcell-hotspot"));

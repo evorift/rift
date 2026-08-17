@@ -73,15 +73,29 @@ pub fn install() -> Result<(), String> {
         let _ = hidden("sc")
             .args(["description", SERVICE_NAME, "VPN'siz DPI atlatma — boot koruması (winws + WARP)."])
             .output();
+        // Crash recovery, IDENTICAL to what the NSIS installer configures. Without this, a service
+        // reinstalled from the app's own button would silently be less resilient than one installed
+        // by the installer — the same name, the same binary, quietly different behaviour.
+        let _ = hidden("sc")
+            .args(["failure", SERVICE_NAME, "reset=", "86400", "actions=", "restart/5000/restart/5000/restart/5000"])
+            .output();
     }
     // Başlat (idempotent: zaten RUNNING ise sc start hata verir ama önemsiz → durumu kontrol et).
     let _ = hidden("sc").args(["start", SERVICE_NAME]).output();
-    if status() == "running" {
-        Ok(())
-    } else {
-        // start hemen RUNNING'e geçmemiş olabilir; SCM async. Yine de kurulum başarılı.
-        Ok(())
+
+    // The SCM starts services asynchronously, so an immediate status read can legitimately still
+    // say "stopped". This used to return Ok REGARDLESS — so a service that never came up produced
+    // a success message and a UI that claimed a working backend. Poll briefly, then tell the truth.
+    for _ in 0..10 {
+        if status() == "running" {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
+    Err(format!(
+        "service was created but did not start (state: {}). Check the Windows event log, or reinstall the app.",
+        status()
+    ))
 }
 
 /// Servisi durdur + kaldır (sc stop + delete). YÖNETİCİ gerektirir. Servissiz moda dönüş.

@@ -49,6 +49,8 @@ const tr = {
     "WARP, dünyanın en hızlı ağlarından biri olan Cloudflare'in küresel kenarında çalışır — yönlendirilen trafik düşük gecikmede kalır, uzak bir sunucuda yavaşlamaz.",
   "foot.smartscreen":
     "İmzasız sürüm: ilk açılışta Windows SmartScreen uyarısı çıkabilir → 'More info → Run anyway'.",
+  "foot.verify": "İndirmeni Releases sayfasındaki SHA256SUMS ile doğrula veya",
+  "foot.official": "Tek resmi kaynak:",
   "foot.made": "MIT lisansı altında açık kaynak.",
   "foot.tagline": "Engelleri aş.",
   "nav.faq": "SSS",
@@ -68,6 +70,12 @@ const tr = {
   "faq.q5": "Windows ilk açılışta uyarı veriyor (SmartScreen)?",
   "faq.a5":
     "Ücretsiz kalmak için sürüm imzasız; bu yüzden Windows bir uyarı gösterebilir → 'More info → Run anyway'. İndirme hash'ini doğrulayabilirsin.",
+  "faq.q6": "Antivirüs 'HackTool' veya benzer bir şey diyor, virüs mü bu?",
+  "faq.a6":
+    "Hayır — bu WinDivert sürücüsü yüzünden. WinDivert, ağ paketlerini yakalayıp yeniden yazan, açık kaynaklı ve yaygın kullanılan (LGPL) bir Windows sürücüsü; evorift'in DPI atlatması tam olarak bunu kullanır. Bazı antivirüs programları paket yakalayan HER programı — gerçek amacı ne olursa olsun — genel bir imzayla 'HackTool' diye işaretler. Bu bilinen ve beklenen bir yanlış pozitif; aşağıdaki VirusTotal linkinden tüm motorların sonucuna bakabilirsin.",
+  "faq.q7": "İndirdiğim dosyanın gerçek olduğunu nasıl doğrularım?",
+  "faq.a7":
+    "GitHub Releases sayfasındaki her sürümün yanında bir SHA256SUMS dosyası var. PowerShell'de 'Get-FileHash indirdigin-dosya.exe -Algorithm SHA256' çalıştır ve çıktıyı SHA256SUMS'taki satırla karşılaştır — eşleşmiyorsa dosyayı çalıştırma. Aynı sayfadan VirusTotal'a da yükleyip tarayabilirsin. evorift'in TEK resmi kaynağı github.com/evorift/rift/releases — başka hiçbir yerden indirme.",
 };
 
 const en = {
@@ -115,6 +123,8 @@ const en = {
     "WARP runs on Cloudflare's global edge — one of the fastest networks in the world — so routed traffic stays low-latency instead of slowing down on a distant server.",
   "foot.smartscreen":
     "Unsigned build: Windows SmartScreen may warn on first launch → 'More info → Run anyway'.",
+  "foot.verify": "Verify your download against the SHA256SUMS on the Releases page, or check it on",
+  "foot.official": "The only official source is:",
   "foot.made": "Open source under the MIT license.",
   "foot.tagline": "Break through the block.",
   "nav.faq": "FAQ",
@@ -134,6 +144,12 @@ const en = {
   "faq.q5": "Windows warns me on first launch (SmartScreen)?",
   "faq.a5":
     "To stay free the build is unsigned, so Windows may show a SmartScreen prompt → 'More info → Run anyway'. You can verify the download hash.",
+  "faq.q6": "My antivirus says 'HackTool' or similar — is this a virus?",
+  "faq.a6":
+    "No — that's the WinDivert driver. WinDivert is an open-source, widely-used (LGPL) Windows driver that captures and rewrites network packets; evorift's DPI bypass is built on exactly that. Some antivirus engines flag ANY program that captures packets — regardless of what it actually does — with a generic 'HackTool' signature. This is a known, expected false positive; check the VirusTotal link below to see every engine's verdict at once.",
+  "faq.q7": "How do I verify the file I downloaded is genuine?",
+  "faq.a7":
+    "Every release on the GitHub Releases page ships with a SHA256SUMS file. Run 'Get-FileHash your-download.exe -Algorithm SHA256' in PowerShell and compare the output against the matching line in SHA256SUMS — if it doesn't match, don't run it. You can also upload the file to VirusTotal from the same page. The ONLY official source for evorift is github.com/evorift/rift/releases — never download it anywhere else.",
 };
 
 const es = {
@@ -181,6 +197,8 @@ const es = {
     "WARP corre en el edge global de Cloudflare —una de las redes más rápidas del mundo—, así el tráfico enrutado mantiene baja latencia en vez de frenarse en un servidor lejano.",
   "foot.smartscreen":
     "Build sin firmar: Windows SmartScreen puede avisar al inicio → 'Más información → Ejecutar de todos modos'.",
+  "foot.verify": "Verifica tu descarga con el SHA256SUMS de la página de Releases, o compruébala en",
+  "foot.official": "La única fuente oficial es:",
   "foot.made": "Código abierto bajo licencia MIT.",
   "foot.tagline": "Atraviesa el bloqueo.",
   "nav.faq": "FAQ",
@@ -200,6 +218,12 @@ const es = {
   "faq.q5": "¿Windows me avisa al iniciar (SmartScreen)?",
   "faq.a5":
     "Para seguir siendo gratis la build no está firmada, así que Windows puede mostrar un aviso de SmartScreen → 'Más información → Ejecutar de todos modos'. Puedes verificar el hash de la descarga.",
+  "faq.q6": "Mi antivirus dice 'HackTool' o algo parecido, ¿es un virus?",
+  "faq.a6":
+    "No — es por el controlador WinDivert. WinDivert es un controlador de Windows de código abierto y muy usado (LGPL) que captura y reescribe paquetes de red; la evasión de DPI de evorift se basa exactamente en eso. Algunos antivirus marcan CUALQUIER programa que capture paquetes —sea cual sea su propósito real— con una firma genérica de 'HackTool'. Es un falso positivo conocido y esperado; revisa el enlace de VirusTotal más abajo para ver el veredicto de todos los motores a la vez.",
+  "faq.q7": "¿Cómo verifico que el archivo que descargué es auténtico?",
+  "faq.a7":
+    "Cada versión en la página de GitHub Releases incluye un archivo SHA256SUMS. Ejecuta 'Get-FileHash tu-descarga.exe -Algorithm SHA256' en PowerShell y compara el resultado con la línea correspondiente en SHA256SUMS — si no coincide, no lo ejecutes. También puedes subir el archivo a VirusTotal desde la misma página. La ÚNICA fuente oficial de evorift es github.com/evorift/rift/releases — nunca lo descargues de otro sitio.",
 };
 
 const ru = {
@@ -247,6 +271,8 @@ const ru = {
     "WARP работает на глобальном edge Cloudflare — одной из самых быстрых сетей в мире — поэтому маршрутизированный трафик остаётся с низкой задержкой, а не тормозит на далёком сервере.",
   "foot.smartscreen":
     "Сборка без подписи: при первом запуске Windows SmartScreen может предупредить → 'Подробнее → Выполнить в любом случае'.",
+  "foot.verify": "Сверьте загрузку с SHA256SUMS на странице Releases или проверьте на",
+  "foot.official": "Единственный официальный источник:",
   "foot.made": "Открытый код под лицензией MIT.",
   "foot.tagline": "Пробей блокировку.",
   "nav.faq": "ЧаВо",
@@ -266,6 +292,12 @@ const ru = {
   "faq.q5": "Windows предупреждает при первом запуске (SmartScreen)?",
   "faq.a5":
     "Чтобы оставаться бесплатной, сборка без подписи, поэтому Windows может показать предупреждение → 'Подробнее → Выполнить в любом случае'. Можно проверить хеш загрузки.",
+  "faq.q6": "Антивирус пишет 'HackTool' или что-то похожее — это вирус?",
+  "faq.a6":
+    "Нет — дело в драйвере WinDivert. WinDivert — это открытый и широко используемый (LGPL) драйвер Windows, который перехватывает и переписывает сетевые пакеты; обход DPI в evorift построен именно на этом. Некоторые антивирусы помечают ЛЮБУЮ программу, перехватывающую пакеты, — независимо от её реального назначения — общей сигнатурой 'HackTool'. Это известный и ожидаемый ложноположительный результат; посмотрите ссылку на VirusTotal ниже, чтобы увидеть вердикт всех движков сразу.",
+  "faq.q7": "Как проверить, что скачанный файл подлинный?",
+  "faq.a7":
+    "К каждому релизу на странице GitHub Releases прилагается файл SHA256SUMS. Выполните в PowerShell 'Get-FileHash ваш-файл.exe -Algorithm SHA256' и сравните результат со строкой в SHA256SUMS — если не совпадает, не запускайте файл. Файл также можно загрузить на VirusTotal с той же страницы. ЕДИНСТВЕННЫЙ официальный источник evorift — github.com/evorift/rift/releases, не скачивайте его больше нигде.",
 };
 
 const dict = { tr, en, es, ru };

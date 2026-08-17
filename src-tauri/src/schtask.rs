@@ -5,6 +5,72 @@
 /// Our scheduled-task name (fixed; not user input → safe to embed in scripts).
 pub const REFRESH_TASK_NAME: &str = "EvoriftTunnelRefresh";
 
+/// Logon task that launches the UI at sign-in.
+pub const LOGON_TASK_NAME: &str = "EvoriftLogon";
+
+/// Build the `Register-ScheduledTask` script for the at-logon UI launch.
+///
+/// WHY A TASK AND NOT THE RUN KEY. `evorift.exe` carries a `requireAdministrator` manifest
+/// (build.rs embeds it for the whole crate). Windows will not silently elevate an app launched from
+/// `HKCU\...\Run` or the Startup folder — there is no interactive consent path at logon, so the
+/// launch simply fails, with nothing written anywhere. Both autostart mechanisms this app shipped
+/// pointed at that exe, which is why "I restarted my PC and evorift did not start" looked like
+/// nothing had been configured at all.
+///
+/// A scheduled task with `-RunLevel Highest` is the supported way to start an elevated app at
+/// logon: the elevation decision is made once, at registration time (which already required admin),
+/// instead of at every launch.
+///
+/// The exe path travels through `$env:EVORIFT_UI_EXE` rather than being interpolated, so a path
+/// containing quotes or `;` cannot become script. Task name and arguments are our own constants.
+pub fn logon_script() -> String {
+    format!(
+        "$ErrorActionPreference='Stop'; \
+         $exe=$env:EVORIFT_UI_EXE; \
+         $a=New-ScheduledTaskAction -Execute $exe -Argument '--minimized'; \
+         $t=New-ScheduledTaskTrigger -AtLogOn -User $env:EVORIFT_UI_USER; \
+         $p=New-ScheduledTaskPrincipal -UserId $env:EVORIFT_UI_USER -RunLevel Highest; \
+         $s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries \
+            -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable; \
+         Register-ScheduledTask -TaskName '{LOGON_TASK_NAME}' -Action $a -Trigger $t -Principal $p \
+            -Settings $s -Force | Out-Null",
+        LOGON_TASK_NAME = LOGON_TASK_NAME,
+    )
+}
+
+/// Register (or replace) the at-logon UI launch task for `user`, pointing at `exe`.
+pub fn create_logon_task(exe: &str, user: &str) -> Result<(), String> {
+    if exe.is_empty() || user.is_empty() {
+        return Err("logon task needs both an executable path and a user".into());
+    }
+    crate::sys::run_os_env(
+        "powershell",
+        &["-NoProfile", "-Command", &logon_script()],
+        &[("EVORIFT_UI_EXE", exe), ("EVORIFT_UI_USER", user)],
+    )?;
+    if crate::sys::privileged() {
+        crate::rollback::record(crate::rollback::Change::ScheduledTask { name: LOGON_TASK_NAME.to_string() });
+    }
+    Ok(())
+}
+
+/// Remove the at-logon UI launch task (best-effort).
+pub fn delete_logon_task() -> Result<(), String> {
+    let script = format!(
+        "Unregister-ScheduledTask -TaskName '{LOGON_TASK_NAME}' -Confirm:$false -ErrorAction SilentlyContinue"
+    );
+    crate::sys::run_os("powershell", &["-NoProfile", "-Command", &script])
+}
+
+/// Is the at-logon task registered? Read-only; works unprivileged, so the UI can show the real
+/// state of the toggle instead of whatever it last wrote to localStorage.
+pub fn logon_task_exists() -> bool {
+    let script = format!(
+        "if (Get-ScheduledTask -TaskName '{LOGON_TASK_NAME}' -ErrorAction SilentlyContinue) {{ 'yes' }}"
+    );
+    crate::sys::query_os("powershell", &["-NoProfile", "-Command", &script]).contains("yes")
+}
+
 /// Build the `Register-ScheduledTask` PowerShell script (pure → testable). Restarts the service named by
 /// `$env:EVORIFT_REFRESH_SVC` every `interval_min` minutes, SYSTEM/Highest, repeating for ~10 years
 /// (docs/03 §1.5). The service name goes through `$env` (no command injection); the task name + interval
