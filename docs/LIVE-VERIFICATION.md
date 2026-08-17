@@ -54,10 +54,17 @@ including `status`, timed out. Fixed by scoping the guard.
 
 | Target | Before (guclu/c1) | After fixes (guclu/c1) |
 |---|---|---|
-| xvideos.com | — | **100/100** |
+| adult-target-A | — | **100/100** |
 | discord.com | — | **100/100** |
-| pornhub.com | — | 0/23 (`tls timeout`) |
-| brazzers.com | — | 0/23 (`tls timeout`) |
+| adult-target-B | — | 0/23 (`tls timeout`) |
+| adult-target-C | — | 0/23 (`tls timeout`) |
+
+Three of the four targets are adult sites, masked as `adult-target-A/B/C` here by the
+owner's decision (2026-08-17): they were picked only because the ISP blocks them
+reliably, which makes them good bypass probes. The mapping is deliberately not
+recorded. Do not restore the names, and never let them reach any user-facing surface —
+site, screenshot, changelog or release note. The numbers are what matters and they are
+unchanged.
 
 `winws` PID: **no changes**, failures spread evenly across all 5s buckets. So this was no longer
 instability — two domains passed 100% and two failed 100%, which is a tuning problem, not a race.
@@ -87,10 +94,10 @@ this tests the shipped code path, not a hand-applied config:
 
 ```
 PROTMODE OK -> guclu (strategy=turkcell-hotspot)   verify=verified
-pornhub.com   100/100  ort 201ms
-brazzers.com  100/100  ort 201ms
-xvideos.com   100/100  ort 216ms
-discord.com   100/100  ort 184ms
+adult-target-B  100/100  ort 201ms
+adult-target-C  100/100  ort 201ms
+adult-target-A  100/100  ort 216ms
+discord.com     100/100  ort 184ms
 TOPLAM        400/400 = 100%     winws restarts: 0, errors per 5s bucket: 0
 ```
 

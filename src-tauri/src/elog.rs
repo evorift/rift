@@ -337,7 +337,7 @@ mod tests {
     fn redact_removes_hostnames_but_keeps_diagnostics() {
         // Requested domains — gone, in every shape a log line puts them in.
         assert_eq!(redact("discord.com: TCP: timed out"), "<site>: TCP: timed out");
-        assert_eq!(redact("probe (www.pornhub.com) failed"), "probe (<site>) failed");
+        assert_eq!(redact("probe (www.maskedtarget.com) failed"), "probe (<site>) failed");
         assert_eq!(redact("opened cdn.discordapp.com"), "opened <site>");
         assert!(!redact("targets: a.example.com, b.example.net").contains("example"));
 
