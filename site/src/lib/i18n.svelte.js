@@ -19,10 +19,11 @@ const tr = {
   "nav.privacy": "Gizlilik",
   "nav.support": "Destek ol",
 
-  "hero.title": "Bağlantın düzelsin.",
+  "hero.title": "Hiçbir şey seni durduramaz.",
   "hero.sub":
     "Operatör kaynaklı bağlantı bozulmalarını gideren Windows aracı. Mesajlaşma, sesli görüşme ve oyunlar yeniden açılır. Sunucumuz yok — trafiğin bizden geçmez.",
   "cta.download": "Windows için indir",
+  "cta.releases": "GitHub Releases",
   "cta.github": "GitHub'da gör",
   "cta.sponsor": "Sponsor ol",
   "platform": "Windows 10 / 11 · 64-bit",
@@ -62,11 +63,6 @@ const tr = {
   "mode.vpn.d":
     "Temiz rota isteyen uygulamalar için Cloudflare WARP üzerinden tünel. Yalnız bu modda tünel kurulur; diğer üç modda trafik doğrudan akar.",
   "mode.wip": "geliştiriliyor",
-
-  "shot.ph": "ekran görüntüsü",
-  "shot.1": "Ana ekran — koruma modunu buradan seçersin.",
-  "shot.2": "Uygulamalar — hangi uygulamanın nasıl davranacağını sen belirlersin.",
-  "shot.3": "Bağlantı — hattının durumu ve seçili ayar.",
 
   "meas.title": "Ölçülen",
   "meas.lead":
@@ -135,10 +131,11 @@ const en = {
   "nav.privacy": "Privacy",
   "nav.support": "Support",
 
-  "hero.title": "Get your connection working.",
+  "hero.title": "Nothing can stop you.",
   "hero.sub":
     "A Windows tool that repairs connections broken by your provider. Messaging, voice and games start working again. We run no servers — your traffic never passes through us.",
   "cta.download": "Download for Windows",
+  "cta.releases": "GitHub Releases",
   "cta.github": "View on GitHub",
   "cta.sponsor": "Sponsor",
   "platform": "Windows 10 / 11 · 64-bit",
@@ -178,11 +175,6 @@ const en = {
   "mode.vpn.d":
     "A tunnel through Cloudflare WARP for apps that need a clean route. Only this mode builds a tunnel; in the other three your traffic goes direct.",
   "mode.wip": "in development",
-
-  "shot.ph": "screenshot",
-  "shot.1": "Main screen — this is where you pick a protection mode.",
-  "shot.2": "Apps — you decide how each app behaves.",
-  "shot.3": "Connection — the state of your line and the selected setting.",
 
   "meas.title": "Measured",
   "meas.lead":
@@ -251,10 +243,11 @@ const es = {
   "nav.privacy": "Privacidad",
   "nav.support": "Apoyar",
 
-  "hero.title": "Que tu conexión funcione.",
+  "hero.title": "Nada puede detenerte.",
   "hero.sub":
     "Una herramienta de Windows que repara conexiones dañadas por tu proveedor. La mensajería, la voz y los juegos vuelven a funcionar. No tenemos servidores: tu tráfico no pasa por nosotros.",
   "cta.download": "Descargar para Windows",
+  "cta.releases": "GitHub Releases",
   "cta.github": "Ver en GitHub",
   "cta.sponsor": "Patrocinar",
   "platform": "Windows 10 / 11 · 64 bits",
@@ -328,10 +321,11 @@ const ru = {
   "nav.privacy": "Приватность",
   "nav.support": "Поддержать",
 
-  "hero.title": "Пусть соединение работает.",
+  "hero.title": "Ничто не сможет тебя остановить.",
   "hero.sub":
     "Программа для Windows, которая исправляет соединение, испорченное провайдером. Мессенджеры, голосовые вызовы и игры снова работают. У нас нет серверов — ваш трафик через нас не идёт.",
   "cta.download": "Скачать для Windows",
+  "cta.releases": "GitHub Releases",
   "cta.github": "Открыть на GitHub",
   "cta.sponsor": "Спонсировать",
   "platform": "Windows 10 / 11 · 64-бит",

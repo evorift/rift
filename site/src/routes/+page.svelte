@@ -1,13 +1,29 @@
 <script>
   import BlackHoleHero from "$lib/BlackHoleHero.svelte";
+  import BinaryRainHero from "$lib/BinaryRainHero.svelte";
   import { t, getLang, setLang, LANGS, LANG_LABEL } from "$lib/i18n.svelte.js";
   import { base } from "$app/paths";
   import { slide } from "svelte/transition";
+  import { onMount } from "svelte";
+  import { SITE_URL } from "$lib/seo.js";
+
+  // Kullanıcı gözlemi: "en başta çok hafif aşağıya kayıp başlıyor" — tarayıcının
+  // kendi scroll-restoration'ı (reload'da önceki konuma dönme) olası sebep.
+  // Manuel'e alıp sayfayı her zaman en tepede başlatıyoruz.
+  onMount(() => {
+    if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+    window.scrollTo(0, 0);
+  });
 
   const BRAND = "evorift";
   const REPO = "https://github.com/evorift/rift";
   const RELEASES = REPO + "/releases";
   const SPONSOR = "https://github.com/sponsors/evorift";
+  // Kullanıcı kararı: indirme butonu ikiye bölünür — sol taraf doğrudan .exe'ye
+  // gider (tıklar tıklamaz iner), sağ taraf sürüm/hash/imza bilgisinin olduğu
+  // Releases sayfasına. Sürüm numarası burada elle yazılı — build-031/tauri.conf.json
+  // ile senkron tutulmalı, yeni sürümde bu satır güncellenmeden unutulmasın.
+  const DIRECT_EXE = RELEASES + "/download/v0.3.1/evorift_0.3.1_x64-setup.exe";
 
   let openFaq = $state(-1);
 
@@ -24,16 +40,44 @@
     { k: "light",  ico: "◔" },
     { k: "strong", ico: "◉" },
     { k: "auto",   ico: "◌", wip: true },
-    { k: "vpn",    ico: "⤳", warp: true },
+    { k: "vpn",    ico: "⤳", warp: true, wip: true },
   ];
 
   const measured = [1, 2, 3];
   const faqs = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+  // Google'ın rich-result'ları render edip etmemesi opsiyonel; ama yapılandırılmış
+  // veri arama motoruna sayfanın ne olduğunu (yazılım, ücretsiz, Windows) net
+  // anlatır. Yalnız görünür sayfa metniyle örtüşen alanlar (skill §1 — ölçülmemiş
+  // hiçbir şey yazılmaz).
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    name: BRAND,
+    url: SITE_URL + "/",
+    operatingSystem: "Windows 10, Windows 11",
+    applicationCategory: "UtilitiesApplication",
+    description:
+      "Operatör kaynaklı bağlantı bozulmalarını gideren Windows aracı. Mesajlaşma, sesli görüşme ve oyunlar yeniden açılır. Sunucu yok, trafik evorift'ten geçmez.",
+    downloadUrl: RELEASES,
+    softwareVersion: "0.3.1",
+    offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+  };
 </script>
 
 <svelte:head>
   <title>{BRAND} — {t("meta.title")}</title>
   <meta name="description" content={t("hero.sub")} />
+  <link rel="canonical" href={SITE_URL + "/"} />
+  {@html `<script type="application/ld+json">${JSON.stringify(jsonLd)}<\/script>`}
+  <!-- bh-settled class'ı yalnız JS animate() döngüsünden gelir. JS kapalıysa hiç
+       eklenmez ve CTA/açıklama kalıcı görünmez kalırdı — içerik animasyona bağlı
+       olmamalı (skill §6). Bu, tek gerçek "JS yoksa da çalışır" güvencesi. -->
+  <noscript>
+    <style>
+      .hero-sub, .cta, .platform { opacity: 1 !important; pointer-events: auto !important; }
+    </style>
+  </noscript>
 </svelte:head>
 
 {#snippet mark()}
@@ -66,16 +110,26 @@
 <section class="hero" id="top">
   <div class="hero-sticky">
     <div class="bh-stage"><BlackHoleHero /></div>
+    <BinaryRainHero />
 
+    <!-- Kullanıcı kararı: "evorift", başlık ve rozet AYRI konumlanmasın — hepsi
+         tek hero-copy grubunda, birlikte hareket etsin. Önceki sürüm wordmark'ı
+         ayrı bir katmanda tam merkeze sabitliyordu; grup dağınık/kopuk görünüyordu.
+         Rozet (chip) kullanıcı kararıyla kaldırıldı. -->
     <div class="hero-copy">
       <div class="wordmark">{BRAND}</div>
-
-      <span class="chip"><i class="dot"></i>{t("brand.badge")}</span>
       <h1 class="hero-title">{t("hero.title")}</h1>
       <p class="hero-sub">{t("hero.sub")}</p>
 
       <div class="cta" id="get">
-        <a class="btn primary" href={RELEASES} target="_blank" rel="noopener">⬇ {t("cta.download")}</a>
+        <div class="split-btn">
+          <a class="btn primary split-main" href={DIRECT_EXE} download target="_blank" rel="noopener">
+            ⬇ {t("cta.download")}
+          </a>
+          <a class="btn primary split-side" href={RELEASES} target="_blank" rel="noopener" aria-label={t("cta.releases")}>
+            {t("cta.releases")}
+          </a>
+        </div>
         <a class="btn" href={REPO} target="_blank" rel="noopener">{t("cta.github")}</a>
         <a class="btn sponsor" href={SPONSOR} target="_blank" rel="noopener">♥ {t("cta.sponsor")}</a>
       </div>
@@ -138,17 +192,6 @@
       {/each}
     </div>
     <p class="meas-caveat">{t("meas.caveat")}</p>
-  </section>
-
-  <section class="shots" id="shots">
-    <div class="shot-grid">
-      {#each [1, 2, 3] as i (i)}
-        <figure class="shot">
-          <div class="shot-ph mono" aria-hidden="true">{t("shot.ph")} {i}</div>
-          <figcaption>{t(`shot.${i}`)}</figcaption>
-        </figure>
-      {/each}
-    </div>
   </section>
 
   <section class="faq" id="faq">
@@ -236,21 +279,48 @@
 
   section { scroll-margin-top: 84px; }
 
-  /* Kaydırma sahnesi: 220vh boyunca sticky kalır, delik shader içinde küçülür.
-     DOM tarafında layout işi yok — tek kaydırma bağımlı şey --p ile opacity. */
-  .hero { position: relative; height: 220vh; }
+  /* Kaydırma sahnesi. Kullanıcı kararı: 220vh'de yerine oturduktan (P_SHRINK)
+     sonra "What it does"a kadar ~78vh tamamen boş/donmuş kayıyordu — hissedilir
+     bir "boşluk" bırakıyordu. 150vh'e indirildi: aynı P_SHRINK oranı (0.35) artık
+     çok daha kısa bir donmuş kuyruk bırakıyor (~33vh yerine ~78vh). */
+  .hero { position: relative; height: 150vh; }
   .hero-sticky {
     position: sticky;
     top: 0;
     height: 100vh;
-    display: grid;
-    place-items: center;
     overflow: hidden;
+    /* mix-blend-mode aşağıda yalnız kendi canvas'larına karşı hesaplansın diye —
+       yoksa blend sayfanın geri kalanına da sızar. */
+    isolation: isolate;
   }
   .bh-stage { position: absolute; inset: 0; }
+  /* Kullanıcı kararı (basitleştirme, son tur): önceki sürümler metni deliğin
+     merkeziyle hizalamaya ve --p'ye göre delikle senkron kaydırmaya çalışıyordu
+     — bu çok sayıda hataya yol açtı (stacking context, containing block, yanlış
+     ölçülmüş viewport, vs.) VE kullanıcı ARTIK bunu istemiyor. Net istek: metin
+     grubu deliğin ALTINDA dursun, SABİT — kaydırmayla hiç hareket etmesi
+     gerekmiyor ("en baştaki konumunda kalabilir"). top:62% gözle seçilmiş bir
+     sabit — deliğin dinlenme boyutundaki (ölçülmüş, bkz. BlackHoleHero.svelte
+     GAP_VH/settledExtraDownPx) tipik alanının altına düşecek şekilde. */
   .hero-copy {
-    position: relative;
-    z-index: 1;
+    position: absolute;
+    /* ÖLÇÜLDÜ ve ÇELİŞKİ BULUNDU: içerik yüksekliği (başlıktan platform'a)
+       ~364px; 800px'lik sticky alana kırpılmadan sığması için top en fazla
+       ~%54 olabilir. Ama delik başlangıç (en büyük) halinde görsel olarak
+       ~816px'e kadar iniyor — "tamamen deliğin altında" olmak için top en az
+       %90+ olması gerekirdi, ki bu da içeriği .hero-sticky'nin overflow:hidden
+       sınırının altına iter (kırpılır — daha önce düzeltilen hatayı geri
+       getirir). İkisi birden sağlanamıyor. %48 seçildi: kırpma YOK (doğrulandı),
+       ama delik en büyük halindeyken üstteki metinle (evorift/başlık) kısmi
+       çakışma kalıyor — deliğin kendi küçülme animasyonuyla hızla açılıyor. */
+    top: 48%;
+    left: 50%;
+    transform: translateX(-50%);
+    /* z-index KASITLI OLARAK yok (auto kalsın). Bir sayı vermek position:absolute
+       ile birleşince kendi stacking context'ini oluşturur — o zaman içindeki
+       mix-blend-mode:difference (hero-sub/platform için hâlâ kullanılıyor) kendi
+       (boş) mikro-bağlamına karşı hesaplanır, delik/yağmura karşı DEĞİL. */
+    width: 100%;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -270,37 +340,108 @@
     transform: rotate(45deg);
     opacity: calc(1 - var(--p) * 3);
   }
+  /* Kullanıcı kararı: metin kara deliğin beyaz kısmına gelince siyah, siyah
+     kısmına gelince beyaz olsun. mix-blend-mode:difference BURADA sadece bir
+     GÜVENLİ VARSAYILAN / no-JS yedeği — WebGL canvas'a karşı güvenilmez çalıştığı
+     kanıtlandı (tarayıcı canvas'ı ayrı katmana alıyor, blend göremiyor; metin
+     beyaz halkanın üzerinde beyaz kalıp kayboluyordu). Gerçek çözüm artık
+     BlackHoleHero.svelte'deki 2D canvas overlay: deliğin karesini kopyalayıp
+     üstüne "difference" modunda metni ÇİZİYOR, piksel piksel garantili. O sistem
+     hazır olunca aşağıdaki kural DOM metnini görünmez yapıp yerini canvas'a
+     bırakır; JS/WebGL hiç çalışmazsa metin burada beyaz kalır (içerik
+     animasyona bağlı olmamalı — skill §6). */
+  .wordmark,
+  .hero-title,
+  .hero-sub,
+  .platform {
+    color: #fff;
+    mix-blend-mode: difference;
+  }
+  /* Yalnız wordmark ve hero-title deliğe değiyor; canvas overlay hazır olunca
+     bunların DOM rengi görünmez olur — çizimi artık overlay yapıyor, ikisi
+     üst üste binmesin. hero-sub/platform CSS blend'de kalıyor (deliğe değmiyor). */
+  :root.text-overlay-ready .wordmark,
+  :root.text-overlay-ready .hero-title {
+    color: transparent;
+  }
   .wordmark {
     font-size: clamp(32px, 7vw, 56px);
     font-weight: 800;
     letter-spacing: -0.01em;
     line-height: 1;
-    color: #fff;
-    margin: 0 0 18px;
+    margin: 0 0 18px; /* hero-copy'nin flex akışına geri döndü, rozetten boşluk gerekiyor */
   }
   .hero-title {
     font-size: clamp(34px, 6vw, 60px);
     line-height: 1.14;
     font-weight: 800;
     letter-spacing: -0.02em;
-    margin: 16px 0 0;
+    /* Eskiden rozetten (chip) boşluk için 16px üst margin taşıyordu; rozet
+       kaldırıldı, artık doğrudan wordmark'ı takip ediyor — wordmark'ın kendi
+       alt margin'i (18px) yeterli, ikisini toplayıp fazla boşluk bırakmayalım. */
+    margin: 0;
     padding-bottom: 0.12em;
-    background: linear-gradient(180deg, #fff 62%, #b9c3b9);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
   }
-  .hero-sub { max-width: 600px; margin-top: 16px; color: var(--text-muted); font-size: clamp(15px, 2.2vw, 18px); }
+  .hero-sub { max-width: 600px; margin-top: 16px; font-size: clamp(15px, 2.2vw, 18px); }
   .cta { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-top: 30px; scroll-margin-top: 120px; }
+
+  /* İndirme butonu ikiye bölünmüş: sol .exe'yi doğrudan indirir, sağ Releases
+     sayfasına (hash/imza bilgisi için) götürür. Tek buton gibi bitişik dururlar. */
+  .split-btn { display: flex; }
+  .split-main {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .split-side {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    border-left: 1px solid rgba(4, 20, 10, 0.35);
+    padding-left: 14px;
+    padding-right: 14px;
+    font-size: 13px;
+  }
+
   .btn.sponsor { color: var(--accent); }
   .btn.sponsor:hover { border-color: var(--accent); color: var(--accent); }
-  .platform { margin-top: 14px; color: var(--text-dim); font-size: 12px; letter-spacing: 0.05em; }
+  .platform { margin-top: 14px; font-size: 12px; letter-spacing: 0.05em; }
+
+  /* Kullanıcı kararı (2026-08-18): ilk ekranda yalnız wordmark + rozet + başlık.
+     Geri kalanı (açıklama, CTA, platform satırı) delik yerine oturunca (bkz.
+     BlackHoleHero.svelte'deki bh-settled class'ı) belirir — indirmeye ulaşmak
+     için kasıtlı olarak biraz daha kaydırma gerektirir. */
+  .hero-sub,
+  .cta,
+  .platform {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.5s ease;
+  }
+  :root.bh-settled .hero-sub { opacity: 0.85; }
+  :root.bh-settled .platform { opacity: 0.55; }
+  :root.bh-settled .hero-sub,
+  :root.bh-settled .cta,
+  :root.bh-settled .platform {
+    pointer-events: auto;
+  }
+  :root.bh-settled .cta { opacity: 1; }
 
   .sec-title { text-align: center; font-size: clamp(24px, 4vw, 34px); font-weight: 800; letter-spacing: -0.01em; margin-bottom: 32px; }
 
   .features { padding: 40px 0; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  /* 4 kart: auto-fit wrap ile bazı genişliklerde 3+1'e bölünüp simetriyi bozuyordu.
+     Sabit yan yana + taşarsa yatay kaydırma (mobilde beklenen, skill kapsamında). */
+  .grid {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 16px;
+    scroll-snap-type: x proximity;
+    padding-bottom: 4px;
+  }
   .card {
+    flex: 1 1 0;
+    min-width: 220px;
+    scroll-snap-align: start;
     background: var(--bg-surface);
     border: 1px solid var(--border-soft);
     border-radius: var(--radius);
@@ -329,8 +470,18 @@
 
   .tech-title { text-align: center; font-size: clamp(18px, 2.6vw, 22px); font-weight: 800; letter-spacing: -0.01em; margin: 44px 0 6px; }
   .tech-lead { text-align: center; max-width: 620px; margin: 0 auto 26px; color: var(--text-muted); font-size: 14.5px; }
-  .tech-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .tech-grid {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 16px;
+    scroll-snap-type: x proximity;
+    padding-bottom: 4px;
+  }
   .tech-card {
+    flex: 1 1 0;
+    min-width: 220px;
+    scroll-snap-align: start;
     background: var(--bg-surface);
     border: 1px solid var(--border-soft);
     border-radius: var(--radius);
@@ -384,23 +535,6 @@
     font-size: 13.5px;
     line-height: 1.6;
   }
-
-  /* Ekran görüntüsü yerleri — gerçek görseller gelince .shot-ph kalkar. */
-  .shots { padding: 8px 0 40px; }
-  .shot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
-  .shot { margin: 0; }
-  .shot-ph {
-    display: grid;
-    place-items: center;
-    aspect-ratio: 1000 / 680;
-    border: 1px dashed var(--border);
-    border-radius: var(--radius);
-    background: var(--bg-surface);
-    color: var(--text-dim);
-    font-size: 12px;
-    letter-spacing: 0.04em;
-  }
-  .shot figcaption { margin-top: 10px; color: var(--text-muted); font-size: 13.5px; }
 
   .faq { padding: 40px 0 56px; }
   .faq-list { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }
@@ -463,16 +597,32 @@
     .langs { margin-left: auto; }
   }
 
-  /* Mobilde ve reduced-motion'da sahne statik çizilir. Sabit duran bir şeyi
-     220vh boyunca kaydırtmanın anlamı yok — hero normal akışa döner. */
-  @media (max-width: 767px) {
+  /* Mobilde sticky-pinned kaydırma sahnesinin anlamı yok (dar ekranda 220vh'lik
+     ölü kaydırma kötü UX) — hero normal akışa döner, ama animate() yine çalışır.
+     Reduced-motion'da ise animate() hiç çalışmaz (bkz. BlackHoleHero.svelte). */
+  @media (max-width: 767px), (prefers-reduced-motion: reduce) {
     .hero { height: auto; }
-    .hero-sticky { position: static; height: auto; min-height: 100svh; padding: 40px 0 56px; }
+    /* static DEĞİL relative: wordmark-anchor/hero-copy position:absolute ile buna
+       göre konumlanıyor — static containing block oluşturmaz, çocuklar tüm sayfaya
+       göre konumlanıp koparlardı. relative sticky-pinning'i aynı şekilde iptal eder. */
+    .hero-sticky { position: relative; height: auto; min-height: 100svh; padding: 40px 0 56px; }
     .scroll-hint { display: none; }
+    /* Masaüstündeki "wordmark ekranın tam ortasında, delikle çakışık" kurgusu
+       sticky-pinned bağlama özgü. Burada hero-sticky height:auto olduğu için
+       position:absolute çocuklar normal akışa katkı vermez — .hero-copy taşarsa
+       overflow:hidden onu kırpardı. İkisini de normal akışa döndürüyoruz. */
+    .wordmark-anchor, .hero-copy {
+      position: static;
+      transform: none;
+      width: auto;
+    }
+    .wordmark-anchor { margin-bottom: 18px; }
   }
+
+  /* Reduced-motion'da animate() hiç çalışmadığı için bh-settled class'ı asla
+     eklenmez — içerik animasyona bağlı olmamalı kuralı (skill §6) gereği CTA/
+     açıklama burada zorla görünür kalır. */
   @media (prefers-reduced-motion: reduce) {
-    .hero { height: auto; }
-    .hero-sticky { position: static; height: auto; min-height: 100svh; padding: 40px 0 56px; }
-    .scroll-hint { display: none; }
+    .hero-sub, .cta, .platform { opacity: 1; pointer-events: auto; }
   }
 </style>

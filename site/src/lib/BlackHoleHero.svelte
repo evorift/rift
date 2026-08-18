@@ -1,19 +1,34 @@
 <script>
   // Uygulamadaki BlackHole.svelte'in DEKORATİF kopyası (orijinale dokunulmadı).
-  // Kara delik shader'ı birebir aynı; eklenenler:
-  //   1. uZoom      — kaydırma ilerlemesiyle delik küçülür (dinlenme konumuna oturur).
-  //   2. Binary yağmuru — AYNI sahnede, ayrı canvas değil. Ufka yakın bükülür, deliğe
-  //      girince söner. Yoğunluk yatay konuma bağlı: kenarlar yoğun, merkez seyrek.
-  //   3. Yığılma diski binary karakterlerden — yutulan engeller diskin malzemesi olur.
+  // Kara delik shader'ı birebir aynı. Eklenenler:
+  //   - uZoom: kaydırma ilerlemesiyle delik büyük başlangıçtan (ZOOM_START)
+  //     dinlenme boyutuna (ZOOM_REST) küçülür.
+  //   - Konum: "evorift" + rozet + başlık artık tek grup (+page.svelte'deki
+  //     .hero-copy), viewport merkezi etrafında ortalı. progress=0'da (kaydırılmamış)
+  //     delik de aynı merkezde — dy=0, kabaca çakışık (kullanıcı kararı: metin
+  //     üzerine gelirse artık şeffaf DOM metni yerine BlackHoleHero'nun kendi 2D
+  //     canvas overlay'i tersine çevrilmiş halini çiziyor). Kaydırdıkça (0→P_SHRINK),
+  //     zoom'la AYNI eğriyle "yavaşça" GAP_VH kadar yukarı kayar — sürekli metnin
+  //     üzerinde durmaz.
+  //   - Kaydırma HIZININ ek eğim (tilt) katkısı, mouse pitch'inin üzerine offset
+  //     olarak eklenir; hız sönümlenince offset de sıfıra döner.
+  //   - Yığılma diski binary karakterlerden (çalışma anında üretilen 0/1 atlasından
+  //     örnekleniyor, dosya yok).
+  //
+  // Binary yağmuru burada DEĞİL — ayrı bir bileşen (BinaryRainHero.svelte), uygulamanın
+  // kendi BinaryRain.svelte'inden doğrudan port edilmiş. Kullanıcı kararı (2026-08-17):
+  // "uygulamadaki svelte'ten kopyala" — shader'a gömülü ilk deneme yerine.
+  //
+  // Statik (rAF'sız) mod YALNIZ gerçek prefers-reduced-motion'a bağlı. Önceki sürüm
+  // dar pencereyi de statik moda sokuyordu (`matchMedia("max-width:767px")` mount
+  // anında kontrol edilip kalıcı hale geliyordu) — tam ekran olmayan, yan panelli ya
+  // da dev tools açık bir masaüstü penceresi bu eşiğin altına kolayca düşer, ve o
+  // pencere sonradan büyüse bile bileşen o oturum boyunca tek karede kalırdı. Bu,
+  // "kara delik oynamıyor" şikayetinin kök nedeniydi.
   //
   // Three.js ASENKRON yüklenir. Yüklenemezse ya da WebGL yoksa bu bileşen sessizce
   // hiçbir şey çizmez; sayfanın içeriği bundan etkilenmez (canvas tamamen dekoratif).
   import { onMount } from "svelte";
-
-  let {
-    // Kaydırmanın kaç piksellik kısmı koreografiye ayrılmış olsun.
-    range = 0,
-  } = $props();
 
   let host;
   let raf = 0;
@@ -23,9 +38,40 @@
   let scrollRaw = 0;
   let progress = 0;
 
-  const SCALE = 0.9;          // iç tampon ölçeği (mevcut koddan korundu)
-  const ZOOM_REST = 2.35;     // dinlenme konumunda delik bu kadar küçülür
-  const RAIN_N = 900;
+  // İç render tamponu artık CSS boyutuyla BİREBİR (kullanıcı kararı: "ekranda
+  // kapladığı çözünürlük kadar" — önceki 512 tavanı bulanık/bloklu görünüyordu).
+  // Bunun bedeli fps: 900+'dan tekrar ~70'e düşer (bkz. skill notu), ama kullanıcı
+  // burada görsel netliği fps'in önüne koydu.
+  // %75 daha büyük başlasın (kullanıcı kararı): apparent boyut ~1/uZoom ile
+  // orantılı, o yüzden başlangıç zoom'u 1/1.75'e düşürüldü (eskiden 1 idi).
+  const ZOOM_START = 1 / 1.75;
+  // Dinlenme boyutu %20 büyütüldü (kullanıcı kararı): apparent boyut ~1/uZoom ile
+  // orantılı, o yüzden 2.35 yerine 2.35/1.2.
+  const ZOOM_REST = 2.35 / 1.2; // ≈ 1.9583
+  const P_SHRINK = 0.35;      // küçülme bu ilerlemede tamamlanır; içerik reveal'i de buna bağlı
+  function smooth01(t) { t = Math.max(0, Math.min(1, t)); return t * t * (3 - 2 * t); }
+  // Dinlenme konumunda delik, kendi (büyütülmüş) dikey boyutunun yarısı kadar
+  // AŞAĞI kaydırılır (kullanıcı kararı). Ölçüm: piksel-örnekleme ile deliğin
+  // dinlenme zoom'undaki gerçek görünür dikey uzanımı bulunup yarısı alındı.
+  let settledExtraDownPx = 0;
+  // Kullanıcı kararı (son tur): "en son yerleştiği konumdan" (yani yukarıdaki
+  // GAP_VH + settledExtraDownPx uygulandıktan SONRAKİ konumdan) bir de kendi
+  // dikey boyutunun 1/3'ü kadar YUKARI kaldırılsın — aynı ölçümden türetiliyor
+  // (extent/3), tahmin değil.
+  let settledExtraUpPx = 0;
+
+  // Kullanıcı kararı (2026-08-18, üçüncü tur): konum artık SCROLL'A bağlı, sabit
+  // zamanlı giriş animasyonu değil. Sayfa açılışında (progress=0) delik "evorift"le
+  // TAM ÇAKIŞIK durur — dy=0, "ekrana ortalı" — reversal (mix-blend-mode:difference)
+  // burada görünür hale gelir. Kaydırdıkça (0→P_SHRINK) dy, aynı zoom eğrisiyle
+  // birlikte "yavaşça" GAP_VH kadar yukarı kayar; sürekli metnin üzerinde durmaz.
+  const GAP_VH = 0.24;
+
+  // Kaydırma HIZININ ek eğim katkısı — mouse pitch'inin üzerine offset olarak
+  // eklenir, ikisi aynı anda etkili olur. Hız sıfırlanınca offset de sıfıra döner
+  // (aşağıdaki EMA sönümü sayesinde), mouse'un kendi konumu bundan etkilenmez.
+  const SCROLL_TILT_K = 0.00028;  // (piksel/sn hız) -> derece çarpanı
+  const SCROLL_TILT_MAX_DEG = 16;
 
   // sabitlenmiş ayarlar
   const rollDeg = -15;
@@ -151,7 +197,7 @@
       return vec4(uv, 0.0, 1.0);
     }`;
 
-  // ---- Yığılma diski: parçacıklar artık binary karakter ----
+  // ---- Yığılma diski: parçacıklar binary karakter ----
   const PART_VERT = PROJ + `
     uniform float uTime, uActive, uRing, uBlackR, uLife;
     attribute float aSeed, aIndex, aBlack, aGlyph;
@@ -187,62 +233,15 @@
     uniform sampler2D uAtlas;
     varying float vA, vBlack, vGlyph;
     void main(){
-      vec2 g = vec2(gl_PointCoord.x * 0.5 + vGlyph * 0.5, gl_PointCoord.y);
+      // gl_PointCoord.y kaynağı ÜSTTEN (0=üst), CanvasTexture'ın V ekseni ise
+      // Three.js'in flipY=true varsayılanıyla ALTTAN (0=alt) — ters düşüyordu.
+      // "0" simetrik olduğu için görünmüyordu, "1" baş aşağı çıkıyordu.
+      vec2 g = vec2(gl_PointCoord.x * 0.5 + vGlyph * 0.5, 1.0 - gl_PointCoord.y);
       float m = texture2D(uAtlas, g).a;
       float a = m * vA;
       if (a < 0.01) discard;
       vec3 col = mix(vec3(1.0), vec3(0.0), vBlack);
       gl_FragColor = vec4(col * a, a);
-    }`;
-
-  // ---- Binary yağmuru: aynı sahnede, ufka yakın bükülür, deliğe girince söner ----
-  // Konum uv uzayında hesaplanır (kara delik shader'ıyla aynı uzay), sonra NDC'ye çevrilir.
-  const RAIN_VERT = `
-    uniform float uTime, uAspect, uZoom, uLens, uFlow, uGlyphPx, uRainA;
-    attribute float aCol, aSeed, aSpeed, aGlyph;
-    varying float vA, vGlyph;
-    void main(){
-      // Düşüş. uFlow=1 iken hızlı ve düz akar (engel yok), 0 iken yavaş ve savruk.
-      float speed = aSpeed * mix(0.55, 1.35, uFlow);
-      float y = 1.25 - fract(uTime * speed + aSeed) * 2.5;
-
-      // Savrulma yalnız akış serbest değilken var — düzeldikçe sıfırlanır.
-      float sway = (1.0 - uFlow) * 0.055 * sin(uTime * 0.7 + aSeed * 31.0);
-      vec2 p = vec2(aCol * uAspect + sway, y);
-
-      // Ufka yakın bükülme (kütleçekimsel mercek). Delik küçüldükçe etkisi kaybolur.
-      float horizon = 0.30 / uZoom;
-      float d = max(length(p), 1e-4);
-      float pull = uLens * 0.055 / max(d * d, 0.015);
-      p -= (p / d) * min(pull, d * 0.85);
-
-      // Deliğe giren sönüyor: yutuldu.
-      float d2 = length(p);
-      float eaten = smoothstep(horizon * 0.85, horizon * 1.9, d2);
-
-      // Yoğunluk yatay konuma bağlı: kenarlar tam, merkez seyrek — yumuşak eğri.
-      float edge = pow(abs(aCol), 0.75);
-      float dens = mix(0.10, 1.0, edge);
-
-      // Üst ve alt kenarda yumuşak giriş/çıkış.
-      float fade = smoothstep(1.25, 1.0, abs(y)) ;
-
-      gl_Position = vec4(p.x / uAspect, p.y, 0.0, 1.0);
-      gl_PointSize = uGlyphPx;
-      vA = dens * eaten * fade * uRainA;
-      vGlyph = aGlyph;
-    }`;
-  const RAIN_FRAG = `
-    precision mediump float;
-    uniform sampler2D uAtlas;
-    uniform vec3 uColor;
-    varying float vA, vGlyph;
-    void main(){
-      vec2 g = vec2(gl_PointCoord.x * 0.5 + vGlyph * 0.5, gl_PointCoord.y);
-      float m = texture2D(uAtlas, g).a;
-      float a = m * vA;
-      if (a < 0.01) discard;
-      gl_FragColor = vec4(uColor * a, a);
     }`;
 
   /** "0" ve "1" karakterlerinden iki hücreli atlas — dosya yok, çalışma anında üretilir. */
@@ -266,11 +265,39 @@
     return tex;
   }
 
+  /** Bir elemanın metnini, tarayıcının GERÇEKTEN sardığı satırlara böler — kendi
+      satır-sarma mantığımızı yazıp CSS'in clamp()/dil/genişliğine göre değişen
+      sarmayı yeniden icat etmek yerine, Range API ile tarayıcının kendi düzen
+      motorunu soruyoruz: her karakter için ayrı bir Range açıp ekran konumunu
+      okuyoruz, aynı "top"a sahip olanlar aynı satırdır. Karakter sayısı küçük
+      (wordmark/başlık), maliyeti önemsiz; yalnız resize/dil değişiminde çağrılır,
+      her karede değil. */
+  function getLineSegments(el) {
+    if (!el || !el.firstChild || el.firstChild.nodeType !== 3) return [];
+    const text = el.firstChild.textContent;
+    const range = document.createRange();
+    const lines = [];
+    let cur = null;
+    for (let i = 0; i < text.length; i++) {
+      range.setStart(el.firstChild, i);
+      range.setEnd(el.firstChild, i + 1);
+      const r = range.getClientRects()[0];
+      if (!r || r.width === 0) continue;
+      if (!cur || Math.abs(r.top - cur.top) > 2) {
+        cur = { top: r.top, left: r.left, bottom: r.bottom, text: "" };
+        lines.push(cur);
+      }
+      cur.left = Math.min(cur.left, r.left);
+      cur.bottom = Math.max(cur.bottom, r.bottom);
+      cur.text += text[i];
+    }
+    return lines;
+  }
+
   onMount(() => {
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const mobile = window.matchMedia("(max-width: 767px)").matches;
-    // reduced-motion ve mobil: hiç animasyon yok, delik dinlenme konumunda tek kare.
-    const still = reduced || mobile;
+    // TEK gerçek statik-mod tetiği: erişilebilirlik tercihi. Genişlik burada ARTIK
+    // kullanılmıyor — bkz. dosya başındaki not.
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     let dead = false;
     let cleanup = () => {};
@@ -295,12 +322,70 @@
       renderer.setClearColor(0x000000, 0);
       host.appendChild(renderer.domElement);
 
+      // Metin "reversal"ı: CSS mix-blend-mode:difference WebGL canvas'a karşı
+      // GÜVENİLMEZ (tarayıcı çoğu zaman canvas'ı ayrı bir compositing katmanına
+      // alır, blend o katmanın içeriğini göremez — metin hep düz beyaz kalır,
+      // beyaz halkanın üzerinde görünmez olur). Kullanıcı kararı: kendi "shader"ımızı
+      // yap. Çözüm: WebGL canvas'ın o anki karesini 2D canvas'a kopyala, üstüne
+      // globalCompositeOperation="difference" ile metni çiz — bu, tarayıcının 2D
+      // canvas compositing'i, tek bağlamda, güvenilir şekilde piksel piksel
+      // tersine çevirir. "evorift" ve başlık için geçerli; ikisi de deliğe değebilen
+      // metinler. hero-sub/platform şu an deliğe hiç değmiyor, CSS blend'de kalıyor.
+      const textCanvas = document.createElement("canvas");
+      textCanvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none;display:block;";
+      host.appendChild(textCanvas);
+      const textCtx = textCanvas.getContext("2d", { willReadFrequently: false });
+
+      let wordmarkLines = [], titleLines = [];
+      function measureTextLines() {
+        wordmarkLines = getLineSegments(document.querySelector(".wordmark"));
+        titleLines = getLineSegments(document.querySelector(".hero-title"));
+      }
+
+      /** Deliğin O ANKİ karesini kopyalayıp üstüne "difference" modunda metni
+          çizer — metin her zaman altındaki gerçek pikselin tam tersi olur.
+          measureTextLines() BURADA, HER ÇAĞRIDA tazeleniyor — .hero-copy artık
+          --p'ye göre kayıyor (bkz. +page.svelte), yalnız mount/resize/dil
+          değişiminde ölçmek ESKİ (kayma öncesi) konumu dondurup çizerdi: metin
+          gerçek DOM'dan ayrı bir yerde "asılı" görünürdü ("arkada kayboluyor"
+          şikayetinin sebebi buydu). Range API ölçümü ucuz (kısa string'ler),
+          60fps tavanı altında sorun değil. */
+      function drawTextOverlay() {
+        measureTextLines();
+        const w = host.clientWidth, h = host.clientHeight;
+        if (w < 2 || h < 2) return;
+        if (textCanvas.width !== w || textCanvas.height !== h) {
+          textCanvas.width = w;
+          textCanvas.height = h;
+        }
+        textCtx.clearRect(0, 0, w, h);
+        textCtx.drawImage(renderer.domElement, 0, 0, w, h);
+
+        textCtx.globalCompositeOperation = "difference";
+        textCtx.fillStyle = "#fff";
+        textCtx.textAlign = "left";
+        textCtx.textBaseline = "bottom";
+
+        const hostRect = host.getBoundingClientRect();
+        const drawLines = (el, lines) => {
+          if (!el || !lines.length) return;
+          const cs = getComputedStyle(el);
+          textCtx.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+          for (const line of lines) {
+            textCtx.fillText(line.text.trim(), line.left - hostRect.left, line.bottom - hostRect.top);
+          }
+        };
+        drawLines(document.querySelector(".wordmark"), wordmarkLines);
+        drawLines(document.querySelector(".hero-title"), titleLines);
+
+        textCtx.globalCompositeOperation = "source-over";
+      }
+
       const scene = new THREE.Scene();
       const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
       const t0 = performance.now();
       const atlas = glyphAtlas(THREE);
 
-      // --- kara delik ---
       const geo = new THREE.PlaneGeometry(2, 2);
       const mat = new THREE.ShaderMaterial({
         uniforms: {
@@ -313,43 +398,8 @@
         transparent: true, depthTest: false, depthWrite: false,
         premultipliedAlpha: true, blending: THREE.NormalBlending,
       });
-      const holeMesh = new THREE.Mesh(geo, mat);
-      holeMesh.renderOrder = 0;
-      scene.add(holeMesh);
+      scene.add(new THREE.Mesh(geo, mat));
 
-      // --- yağmur: delikten ÖNCE çizilir, böylece silüetin arkasına giren kaybolur ---
-      const rg = new THREE.BufferGeometry();
-      const rCol = new Float32Array(RAIN_N), rSeed = new Float32Array(RAIN_N);
-      const rSpeed = new Float32Array(RAIN_N), rGlyph = new Float32Array(RAIN_N);
-      for (let i = 0; i < RAIN_N; i++) {
-        // pow(u, 0.45) dağılımı kenarlara doğru yığar — merkez sütun seyrek kalır.
-        const u = Math.random();
-        rCol[i] = (Math.random() < 0.5 ? -1 : 1) * Math.pow(u, 0.45);
-        rSeed[i] = Math.random();
-        rSpeed[i] = 0.09 + Math.random() * 0.16;
-        rGlyph[i] = Math.random() < 0.5 ? 0 : 1;
-      }
-      rg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(RAIN_N * 3), 3));
-      rg.setAttribute("aCol", new THREE.BufferAttribute(rCol, 1));
-      rg.setAttribute("aSeed", new THREE.BufferAttribute(rSeed, 1));
-      rg.setAttribute("aSpeed", new THREE.BufferAttribute(rSpeed, 1));
-      rg.setAttribute("aGlyph", new THREE.BufferAttribute(rGlyph, 1));
-      const rMat = new THREE.ShaderMaterial({
-        uniforms: {
-          uTime: { value: 0 }, uAspect: { value: 1 }, uZoom: { value: 1 },
-          uLens: { value: 1 }, uFlow: { value: 0 }, uGlyphPx: { value: 12 },
-          uRainA: { value: 1 }, uAtlas: { value: atlas },
-          uColor: { value: new THREE.Color(0x39e66b) },
-        },
-        vertexShader: RAIN_VERT, fragmentShader: RAIN_FRAG,
-        transparent: true, depthTest: false, depthWrite: false,
-        premultipliedAlpha: true, blending: THREE.NormalBlending,
-      });
-      const rain = new THREE.Points(rg, rMat);
-      rain.renderOrder = -1;
-      scene.add(rain);
-
-      // --- disk parçacıkları (binary) ---
       const N = 198;
       const pg = new THREE.BufferGeometry();
       const aSeed = new Float32Array(N), aIndex = new Float32Array(N);
@@ -381,6 +431,14 @@
 
       let mx = 0, my = 0, yaw = 0, pitch = 0.25, active = 0;
       let sized = false;
+      let gapPx = 0;
+
+      /** Dinlenme boşluğu — window.innerHeight'a göre, resize'da tazelenir.
+          Hiçbir DOM elemanı ölçülmüyor: progress=0'da delik zaten hero-copy
+          grubunun (+page.svelte) merkeziyle kabaca çakışık. */
+      function measureGap() {
+        gapPx = GAP_VH * window.innerHeight;
+      }
 
       /** Ölçü alınamadıysa (element henüz 0×0) hiçbir şeyi ayarlamaz — yoksa 1px'lik
           tampon kalıcı hale gelir. Sayfa görünmezken ResizeObserver tetiklenmediği için
@@ -388,29 +446,84 @@
       function size() {
         const w = host.clientWidth, h = host.clientHeight;
         if (w < 2 || h < 2) return false;
-        const bw = Math.max(1, Math.round(w * SCALE)), bh = Math.max(1, Math.round(h * SCALE));
-        renderer.setSize(bw, bh, false);
+        // Tampon artık CSS boyutuyla birebir — bkz. dosya başındaki not.
+        renderer.setSize(w, h, false);
         renderer.domElement.style.width = w + "px";
         renderer.domElement.style.height = h + "px";
-        mat.uniforms.uRes.value.set(bw, bh);
-        const aspect = w / h;
-        pMat.uniforms.uAspect.value = aspect;
-        rMat.uniforms.uAspect.value = aspect;
-        rMat.uniforms.uGlyphPx.value = Math.max(8, Math.min(20, bh * 0.019));
+        mat.uniforms.uRes.value.set(w, h);
+        pMat.uniforms.uAspect.value = w / h;
         sized = true;
         return true;
       }
 
-      /** Tek kare çiz — hem canlı döngü hem statik mod bunu kullanır. */
-      function draw(t) {
-        const zoom = 1 + (ZOOM_REST - 1) * progress;
+      /** "Delik kendi dikey boyutunun yarısı kadar aşağıda olsun" (kullanıcı
+          kararı) — TAHMİN değil, GERÇEK piksel ölçümü: dinlenme zoom'unda bir
+          kare çizip merkez sütunda gl.readPixels ile ilk/son opak satırı bulur,
+          farkının yarısını alır. Buffer artık CSS boyutuyla birebir olduğu için
+          (bkz. size()) ölçüm doğrudan CSS piksel cinsinden çıkıyor. */
+      function measureSettledVerticalExtent() {
+        if (!sized) return;
+        // active (reveal faktörü) mount'ta 0'dan başlayıp yavaşça 1'e çıkar; bu
+        // fonksiyon setup'ın hemen ardından çağrılırsa active≈0 olur ve shader'ın
+        // son satırı (gl_FragColor *= uReveal) HER ŞEYİ (alpha dahil) sıfırlar —
+        // ölçüm hiç opak piksel bulamaz. Ölçüm için active'i geçici zorluyoruz.
+        const keepP = progress, keepActive = active;
+        progress = P_SHRINK;
+        active = 1;
+        draw(1);
+        const gl = renderer.getContext();
+        const bw = renderer.domElement.width, bh = renderer.domElement.height;
+        const cx = Math.floor(bw / 2);
+        const px = new Uint8Array(bh * 4);
+        gl.readPixels(cx, 0, 1, bh, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        let top = -1, bottom = -1;
+        for (let row = 0; row < bh; row++) {
+          if (px[row * 4 + 3] > 10) {
+            if (top < 0) top = row;
+            bottom = row;
+          }
+        }
+        progress = keepP;
+        active = keepActive;
+        if (top >= 0 && bottom > top) {
+          const extent = bottom - top;
+          settledExtraDownPx = extent / 2;
+          settledExtraUpPx = extent / 3;
+        }
+      }
+
+      /** Tek kare çiz — hem canlı döngü hem statik mod bunu kullanır.
+          scrollVel: piksel/sn kaydırma hızı — yalnız mouse pitch'inin üzerine
+          eklenen bir eğim offseti üretir, kendisi bir konum/zoom girdisi değil. */
+      function draw(t, scrollVel = 0) {
+        // Aşama 1 (0→P_SHRINK): büyük başlangıçtan dinlenme boyutuna küçül.
+        const zoom = progress <= P_SHRINK
+          ? ZOOM_START + (ZOOM_REST - ZOOM_START) * smooth01(progress / P_SHRINK)
+          : ZOOM_REST;
+
+        // progress=0'da dy=0 (wordmark'la çakışık — reversal burada görünür).
+        // Kaydırdıkça (0→P_SHRINK), zoom'la AYNI eğriyle, "yavaşça" -gapPx'e
+        // yükselir; sürekli metnin üzerinde durmaz. still'de progress zaten
+        // P_SHRINK'te sabit, o yüzden aynı formül orada da doğru sonucu verir.
+        // settledExtraDownPx: dinlenme konumunda delik kendi (ölçülmüş) dikey
+        // boyutunun yarısı kadar AŞAĞI iner. settledExtraUpPx: kullanıcının SON
+        // kararı — o "en son yerleştiği konum"dan (yukarıdaki iki terim
+        // uygulandıktan SONRA) bir de kendi boyutunun 1/3'ü kadar YUKARI
+        // kaldırılır. Üçü de AYNI eğriyle karışıyor ki tek, tutarlı bir hareket
+        // gibi hissettirsin.
+        const settleT = smooth01(progress / P_SHRINK);
+        const settledDy = -gapPx + settledExtraDownPx - settledExtraUpPx;
+        const dy = progress <= P_SHRINK ? settledDy * settleT : settledDy;
+        host.style.transform = `translateY(${dy.toFixed(1)}px)`;
+
         const D2R = Math.PI / 180;
         const rollRad = rollDeg * D2R;
 
         if (!still) {
           const drift = Math.sin(t * 0.12) * 0.06;
           const yawT = mx * (yawDeg * D2R) + drift;
-          const pitchT = (pitchBaseDeg * D2R) + (my >= 0 ? my * pitchUpDeg : my * pitchDnDeg) * D2R;
+          const tiltDeg = Math.max(-SCROLL_TILT_MAX_DEG, Math.min(SCROLL_TILT_MAX_DEG, scrollVel * SCROLL_TILT_K));
+          const pitchT = (pitchBaseDeg * D2R) + (my >= 0 ? my * pitchUpDeg : my * pitchDnDeg) * D2R + tiltDeg * D2R;
           yaw += (yawT - yaw) * 0.06;
           pitch += (pitchT - pitch) * 0.06;
           pitch = Math.max(0, Math.min(1.35, pitch));
@@ -439,62 +552,12 @@
         pMat.uniforms.uZoom.value = zoom;
         points.visible = active > 0.001;
 
-        // Delik küçüldükçe mercek etkisi biter ve akış düzelir.
-        rMat.uniforms.uTime.value = t;
-        rMat.uniforms.uZoom.value = zoom;
-        rMat.uniforms.uLens.value = 1 - progress;
-        rMat.uniforms.uFlow.value = progress;
-        rMat.uniforms.uRainA.value = still ? 0.5 : 1;
-
         renderer.render(scene, camera);
-      }
-
-      // --- statik mod: tek kare, rAF yok ---
-      if (still) {
-        progress = 1;
-        const obs = new ResizeObserver(() => { if (size()) draw(0.8); });
-        obs.observe(host);
-        if (size()) draw(0.8);
-        cleanup = () => {
-          obs.disconnect();
-          geo.dispose(); mat.dispose(); rg.dispose(); rMat.dispose();
-          pg.dispose(); pMat.dispose(); atlas.dispose();
-          renderer.dispose(); renderer.forceContextLoss(); renderer.domElement.remove();
-        };
-        return;
-      }
-
-      // --- canlı döngü ---
-      let frames = 0, fpsT = 0;
-
-      function animate() {
-        raf = requestAnimationFrame(animate);
-        if (!sized && !size()) return;
-        const t = (performance.now() - t0) / 1000;
-
-        // Kaydırma: bir kez okunmuş değeri burada yumuşat.
-        const span = range || window.innerHeight || 1;
-        const target = Math.max(0, Math.min(1, scrollRaw / span));
-        progress += (target - progress) * 0.12;
-        if (Math.abs(target - progress) < 0.002) progress = target;
-        // CSS tarafı da aynı ilerlemeyi kullanır — ikinci bir rAF/scroll döngüsü yok.
-        document.documentElement.style.setProperty("--p", progress.toFixed(3));
-
-        draw(t);
-
-        frames++;
-        if (t - fpsT >= 1) {
-          fps = Math.round(frames / (t - fpsT));
-          frames = 0;
-          fpsT = t;
-          window.__evoriftFps = fps;
-        }
+        drawTextOverlay();
       }
 
       if (import.meta.env.DEV) {
-        // Ölçüm kancası (YALNIZ dev build). Sekme görünmezken rAF durduğu için fps'i
-        // senkron çizim + readPixels ile ölçer; readPixels GPU'yu bitirmeye zorlar,
-        // yoksa sadece komut kuyruğa atma süresini ölçmüş olurduk.
+        // Ölçüm kancası (YALNIZ dev build). readPixels GPU'yu bitirmeye zorlar.
         window.__evoriftBench = (p = 0, frames = 60) => {
           if (!sized && !size()) return null;
           const gl = renderer.getContext();
@@ -517,10 +580,126 @@
             buffer: [renderer.domElement.width, renderer.domElement.height],
           };
         };
+        // Görsel kancası (YALNIZ dev build). Sekme gizliyken bile toDataURL çalışır
+        // (compositor'dan değil GL çizim tamponundan okur) — bu, tarayıcı paneli
+        // görünmediğinde tek gerçek doğrulama yolu.
+        window.__evoriftSnapshot = (p = 0) => {
+          const prevSize = [renderer.domElement.width, renderer.domElement.height];
+          renderer.setSize(360, 202, false);
+          mat.uniforms.uRes.value.set(360, 202);
+          pMat.uniforms.uAspect.value = 360 / 202;
+          const keep = progress;
+          progress = p;
+          draw(1.2);
+          const url = renderer.domElement.toDataURL("image/png");
+          progress = keep;
+          renderer.setSize(prevSize[0], prevSize[1], false);
+          if (sized) size();
+          return url;
+        };
+      }
+
+      // --- statik mod: tek kare, rAF yok ---
+      if (still) {
+        // Dinlenme boyutunda — progress=P_SHRINK, aynı dy formülü -gapPx'e sabitler.
+        // measureTextLines() ayrıca çağrılmıyor — draw()→drawTextOverlay() zaten
+        // her seferinde kendi tazeler.
+        progress = P_SHRINK;
+        measureGap();
+        document.documentElement.classList.add("text-overlay-ready");
+        const textObs = new MutationObserver(() => draw(0.8));
+        [".wordmark", ".hero-title"].forEach((sel) => {
+          const el = document.querySelector(sel);
+          if (el) textObs.observe(el, { characterData: true, childList: true, subtree: true });
+        });
+        const obs = new ResizeObserver(() => { measureGap(); if (size()) { measureSettledVerticalExtent(); draw(0.8); } });
+        obs.observe(host);
+        if (size()) { measureSettledVerticalExtent(); draw(0.8); }
+        cleanup = () => {
+          obs.disconnect();
+          textObs.disconnect();
+          document.documentElement.classList.remove("text-overlay-ready");
+          geo.dispose(); mat.dispose(); pg.dispose(); pMat.dispose(); atlas.dispose();
+          renderer.dispose(); renderer.forceContextLoss(); renderer.domElement.remove();
+          textCanvas.remove();
+        };
+        return;
+      }
+
+      // --- canlı döngü ---
+      let frames = 0, fpsT = 0;
+      // Kaydırma yumuşatmasının payda için: .hero'nun gerçek yüksekliği kullanılır,
+      // window.innerHeight varsayımı değil. 220vh/100vh sticky ise 120vh mesafe kaydırılır;
+      // önceki sürüm bunu 100vh sanıyordu, delik ilerlemenin ilk %83'ünde küçülüp kalıyordu.
+      let heroTop = 0, span = 1;
+      function measureHero() {
+        const heroEl = host.closest(".hero") || host;
+        const r = heroEl.getBoundingClientRect();
+        heroTop = r.top + window.scrollY;
+        span = Math.max(1, heroEl.offsetHeight - window.innerHeight);
+      }
+
+      let lastScrollForVel = scrollRaw, lastVelT = 0, scrollVel = 0;
+      // Delik yerine oturunca (P_SHRINK'i geçince) sayfa geri kalan içeriği/CTA'yı
+      // açar — bkz. +page.svelte'deki :root.bh-settled kuralları. Class, değer
+      // gerçekten değişince tek sefer yazılır (her karede yazmak gereksiz).
+      let settled = false;
+
+      // Kullanıcı kararı: 60fps'te CAP'lensin — yüksek yenileme hızlı ekranlarda
+      // (144Hz+) rAF sınırsız çalışırdı, ihtiyaçtan fazla GPU/pil harcardı. rAF
+      // yine her tick'te planlanır (zamanlama akışı bozulmasın), ama süre dolmadan
+      // gelen kareler HİÇBİR iş yapmadan atlanır — hesaplama da, çizim de yok.
+      const MAX_FPS = 60;
+      const MIN_FRAME_MS = 1000 / MAX_FPS;
+      let lastRenderMs = 0;
+
+      function animate() {
+        raf = requestAnimationFrame(animate);
+        const nowMs = performance.now();
+        if (nowMs - lastRenderMs < MIN_FRAME_MS) return;
+        lastRenderMs = nowMs;
+        if (!sized && !size()) return;
+        const t = (nowMs - t0) / 1000;
+
+        const target = Math.max(0, Math.min(1, (scrollRaw - heroTop) / span));
+        progress += (target - progress) * 0.12;
+        if (Math.abs(target - progress) < 0.002) progress = target;
+        document.documentElement.style.setProperty("--p", progress.toFixed(3));
+
+        const isSettled = progress > P_SHRINK;
+        if (isSettled !== settled) {
+          settled = isSettled;
+          document.documentElement.classList.toggle("bh-settled", settled);
+        }
+
+        // Kaydırma HIZI (px/sn), EMA ile yumuşatılmış — durunca kendiliğinden 0'a
+        // söner, bu yüzden ayrı bir "geri dön" mantığı gerekmiyor.
+        const dt = Math.max(0.001, t - lastVelT);
+        const instVel = (scrollRaw - lastScrollForVel) / dt;
+        lastScrollForVel = scrollRaw;
+        lastVelT = t;
+        scrollVel += (instVel - scrollVel) * 0.15;
+
+        draw(t, scrollVel);
+
+        frames++;
+        if (t - fpsT >= 1) {
+          fps = Math.round(frames / (t - fpsT));
+          frames = 0;
+          fpsT = t;
+          window.__evoriftFps = fps;
+        }
       }
 
       size();
-      const obs = new ResizeObserver(size);
+      measureHero();
+      measureGap();
+      measureSettledVerticalExtent();
+      document.documentElement.classList.add("text-overlay-ready");
+      // Dil değişimi veya kaydırma sonucu konum değişikliği burada AYRICA izlenmiyor
+      // — animate() zaten her karede çalışıp drawTextOverlay() üzerinden
+      // measureTextLines()'ı tazeliyor, bir sonraki karede otomatik yansır.
+      const obs = new ResizeObserver(() => { size(); measureHero(); measureGap(); measureSettledVerticalExtent(); });
       obs.observe(host);
 
       const onScroll = () => { scrollRaw = window.scrollY || 0; };
@@ -534,9 +713,11 @@
         if (document.hidden) { cancelAnimationFrame(raf); raf = 0; }
         else if (!raf) animate();
       };
+      const onResize = () => { measureHero(); measureGap(); };
 
       onScroll();
       window.addEventListener("scroll", onScroll, { passive: true });
+      window.addEventListener("resize", onResize, { passive: true });
       host.addEventListener("pointermove", onMove);
       host.addEventListener("pointerleave", onLeave);
       document.addEventListener("visibilitychange", onVis);
@@ -545,13 +726,15 @@
       cleanup = () => {
         cancelAnimationFrame(raf);
         obs.disconnect();
+        document.documentElement.classList.remove("text-overlay-ready");
         window.removeEventListener("scroll", onScroll);
+        window.removeEventListener("resize", onResize);
         host.removeEventListener("pointermove", onMove);
         host.removeEventListener("pointerleave", onLeave);
         document.removeEventListener("visibilitychange", onVis);
-        geo.dispose(); mat.dispose(); rg.dispose(); rMat.dispose();
-        pg.dispose(); pMat.dispose(); atlas.dispose();
+        geo.dispose(); mat.dispose(); pg.dispose(); pMat.dispose(); atlas.dispose();
         renderer.dispose(); renderer.forceContextLoss(); renderer.domElement.remove();
+        textCanvas.remove();
       };
     })();
 
