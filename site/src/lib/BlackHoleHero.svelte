@@ -631,12 +631,24 @@
       // Kaydırma yumuşatmasının payda için: .hero'nun gerçek yüksekliği kullanılır,
       // window.innerHeight varsayımı değil. 220vh/100vh sticky ise 120vh mesafe kaydırılır;
       // önceki sürüm bunu 100vh sanıyordu, delik ilerlemenin ilk %83'ünde küçülüp kalıyordu.
-      let heroTop = 0, span = 1;
+      let heroTop = 0, span = 1, hasScrollTrack = true;
       function measureHero() {
         const heroEl = host.closest(".hero") || host;
         const r = heroEl.getBoundingClientRect();
         heroTop = r.top + window.scrollY;
-        span = Math.max(1, heroEl.offsetHeight - window.innerHeight);
+        const rawSpan = heroEl.offsetHeight - window.innerHeight;
+        // Mobil düzende (.hero{height:auto}, ≤767px medya sorgusu) sticky-pin
+        // kaydırma pisti yok — rawSpan neredeyse 0'a düşer, (scrollRaw-heroTop)/span
+        // oranı 1 piksellik kaydırmada bile 1'e fırlar (kullanıcı bildirimi: belli
+        // genişliklerde delik büyük/bozuk kalıp CTA'nın üstüne biniyordu). Genişliğe
+        // bakan bir eşik EKLEMİYORUZ — dosya başındaki not bu yolun daha önce
+        // "dar pencerede animasyon kalıcı donuyor" hatasına yol açtığını ve geri
+        // alındığını anlatıyor. Bunun yerine gerçek pist uzunluğunu ölçüyoruz;
+        // yoksa (rawSpan küçükse) hedefi doğrudan yerleşmiş konuma sabitliyoruz —
+        // hâlâ mount'ta yumuşak geçiş yapar (progress lerp'i aynı kalır), yalnız
+        // gerçek kaydırmaya bağlı kalmaz.
+        hasScrollTrack = rawSpan > 40;
+        span = Math.max(1, rawSpan);
       }
 
       let lastScrollForVel = scrollRaw, lastVelT = 0, scrollVel = 0;
@@ -661,7 +673,9 @@
         if (!sized && !size()) return;
         const t = (nowMs - t0) / 1000;
 
-        const target = Math.max(0, Math.min(1, (scrollRaw - heroTop) / span));
+        const target = hasScrollTrack
+          ? Math.max(0, Math.min(1, (scrollRaw - heroTop) / span))
+          : 1;
         progress += (target - progress) * 0.12;
         if (Math.abs(target - progress) < 0.002) progress = target;
         document.documentElement.style.setProperty("--p", progress.toFixed(3));
