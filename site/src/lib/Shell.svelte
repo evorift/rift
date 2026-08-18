@@ -3,8 +3,9 @@
   // Ana sayfa kendi hero düzenini taşıdığı için bunu kullanmaz.
   import { t, getLang, setLang, LANGS, LANG_LABEL } from "$lib/i18n.svelte.js";
   import { base } from "$app/paths";
+  import { SITE_URL } from "$lib/seo.js";
 
-  let { title, lead = "", children } = $props();
+  let { title, lead = "", description = "", path = "/", children } = $props();
 
   const BRAND = "evorift";
   const REPO = "https://github.com/evorift/rift";
@@ -13,6 +14,8 @@
 
 <svelte:head>
   <title>{BRAND} — {title}</title>
+  {#if description}<meta name="description" content={description} />{/if}
+  <link rel="canonical" href={SITE_URL + path} />
 </svelte:head>
 
 <header class="topbar">

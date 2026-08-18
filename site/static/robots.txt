@@ -1,2 +1,4 @@
 User-agent: *
 Allow: /
+
+Sitemap: https://evorift.evrimmete.com/sitemap.xml

@@ -60,6 +60,7 @@
         "Ayarların ve günlükler yalnız kendi bilgisayarında durur. Günlüklere alan adı yazılmaz; yazılmadığını doğrulayan bir test var. Ayrıntı Gizlilik sayfasında.",
       srcT: "Kaynak kod",
       srcD: "Çekirdek açık kaynak, MIT lisansı. İncelemek istersen:",
+      metaDesc: `evorift'i indir: Windows 10/11, ${SIZE} kurulum dosyası. SHA-256, imza durumu, SmartScreen rehberi ve VirusTotal linki bu sayfada.`,
     },
     en: {
       title: "Download",
@@ -102,13 +103,14 @@
         "Your settings and logs stay on your own machine. Domain names are not written to the logs, and there is a test that proves they aren't. Detail on the Privacy page.",
       srcT: "Source code",
       srcD: "The core is open source under the MIT license. If you want to read it:",
+      metaDesc: `Download evorift: Windows 10/11, ${SIZE} installer. SHA-256, signing status, SmartScreen guide and VirusTotal link on this page.`,
     },
   };
 
   const c = $derived(L[getLang()] ?? L.en);
 </script>
 
-<Shell title={c.title} lead={c.lead}>
+<Shell title={c.title} lead={c.lead} description={c.metaDesc} path="/indir">
   <section class="block get-block">
     <a class="btn primary big" href={RELEASES} target="_blank" rel="noopener">⬇ {c.get}</a>
     <p class="file mono">{FILE} · {SIZE}</p>

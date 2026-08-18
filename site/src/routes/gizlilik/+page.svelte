@@ -30,6 +30,8 @@
       siteT: "Bu site",
       siteD:
         "Bu sayfada analitik, çerez, harici yazı tipi, reklam ya da sohbet aracı yok. Hiçbir üçüncü taraf script'i yüklenmiyor. Ziyaretini kimse saymıyor.",
+      metaDesc:
+        "evorift hiçbir veri toplamaz: sunucu, hesap, telemetri yok. Neyin toplanmadığı ve bilgisayarında ne durduğu bu sayfada.",
     },
     en: {
       title: "Privacy",
@@ -58,13 +60,15 @@
       siteT: "This website",
       siteD:
         "This page has no analytics, cookies, external fonts, ads or chat widget. No third-party script is loaded. Nobody is counting your visit.",
+      metaDesc:
+        "evorift collects no data: no servers, no accounts, no telemetry. What isn't collected and what stays on your machine, on this page.",
     },
   };
 
   const c = $derived(L[getLang()] ?? L.en);
 </script>
 
-<Shell title={c.title} lead={c.lead}>
+<Shell title={c.title} lead={c.lead} description={c.metaDesc} path="/gizlilik">
   <section class="block">
     <h2>{c.noServerT}</h2>
     <p>{c.noServerD}</p>

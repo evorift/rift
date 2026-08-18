@@ -22,6 +22,8 @@
       noteT: "Söz vermediğimiz şey",
       noteD:
         "Destek olmak öncelikli yanıt, özel özellik ya da garanti getirmez. Böyle bir katman kurmuyoruz; kurarsak da ücretsiz sürümden bir şey eksilterek olmayacak.",
+      metaDesc:
+        "evorift ücretsiz ve öyle kalacak. GitHub Sponsors üzerinden ya da para vermeden nasıl destek olabileceğin bu sayfada.",
     },
     en: {
       title: "Support",
@@ -39,13 +41,15 @@
       noteT: "What we are not promising",
       noteD:
         "Sponsoring does not buy priority replies, private features or guarantees. We are not building that tier; if we ever do, it will not be by taking something away from the free build.",
+      metaDesc:
+        "evorift is free and will stay that way. How to support it through GitHub Sponsors or without paying anything, on this page.",
     },
   };
 
   const c = $derived(L[getLang()] ?? L.en);
 </script>
 
-<Shell title={c.title} lead={c.lead}>
+<Shell title={c.title} lead={c.lead} description={c.metaDesc} path="/destek">
   <section class="block">
     <h2>{c.whyT}</h2>
     <p>{c.whyD}</p>
